@@ -6,6 +6,15 @@ const state = {
   flashTimerId: null,
 };
 
+class AppRequestError extends Error {
+  constructor(kind, status = null) {
+    super(kind);
+    this.name = "AppRequestError";
+    this.kind = kind;
+    this.status = status;
+  }
+}
+
 const elements = {
   filter: document.querySelector("#session-filter"),
   list: document.querySelector("#session-list"),
@@ -51,18 +60,43 @@ function escapeHtml(value) {
 }
 
 function getErrorMessage(error, fallback) {
-  if (error instanceof Error) {
-    return error.message;
+  if (error instanceof AppRequestError) {
+    if (error.kind === "network") {
+      return "網路連線失敗，請確認服務狀態後重試。";
+    }
+    if (error.kind === "parse") {
+      return "伺服器回傳資料格式異常。";
+    }
+    if (error.kind === "http") {
+      if (error.status === 404) {
+        return "找不到指定資源（HTTP 404）。";
+      }
+      if (error.status !== null && error.status >= 500) {
+        return `伺服器暫時無法回應（HTTP ${error.status}）。`;
+      }
+      return `請求失敗（HTTP ${error.status ?? "未知"}）。`;
+    }
   }
   return fallback;
 }
 
 async function getJson(url) {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Request failed for ${url}: ${response.status}`);
+  let response;
+  try {
+    response = await fetch(url);
+  } catch {
+    throw new AppRequestError("network");
   }
-  return response.json();
+
+  if (!response.ok) {
+    throw new AppRequestError("http", response.status);
+  }
+
+  try {
+    return await response.json();
+  } catch {
+    throw new AppRequestError("parse");
+  }
 }
 
 function formatHeaders(headers) {
@@ -115,6 +149,14 @@ function updateSessionCount(visibleCount, totalCount) {
       totalCount === 0 ? "idle" : "active";
     elements.sessionCountChip.title = `目前顯示 ${countText} 流量事件`;
   }
+}
+
+function setSessionCountChipState(status, title = "") {
+  if (!elements.sessionCountChip) {
+    return;
+  }
+  elements.sessionCountChip.dataset.state = status;
+  elements.sessionCountChip.title = title;
 }
 
 function renderList() {
@@ -264,14 +306,23 @@ async function loadSessions() {
     const sessions = await getJson("/api/sessions");
     state.sessions = mergeSessions(state.sessions, sessions);
     renderList();
+    setSessionCountChipState(
+      state.sessions.length === 0 ? "idle" : "active",
+      state.sessions.length === 0
+        ? "目前尚未收到流量事件"
+        : `目前共 ${state.sessions.length} 筆流量事件`,
+    );
     if (!state.selectedId && state.sessions.length > 0) {
       await loadSessionDetail(state.sessions[0].id);
     } else if (state.selectedId) {
       renderList();
     }
+    return true;
   } catch (error) {
     const message = getErrorMessage(error, "讀取流量事件失敗。");
     elements.list.innerHTML = `<p class="placeholder">${escapeHtml(`讀取流量事件失敗：${message}`)}</p>`;
+    setSessionCountChipState("error", `流量事件同步失敗：${message}`);
+    return false;
   }
 }
 
@@ -302,17 +353,30 @@ function prependSession(session) {
 
 function subscribeToEvents() {
   const eventSource = new EventSource("/api/events");
-  let initialSyncComplete = false;
+  let syncInFlight = null;
+
+  async function resyncSessions() {
+    if (syncInFlight) {
+      return syncInFlight;
+    }
+
+    setLiveStatus("同步中", "syncing");
+    syncInFlight = (async () => {
+      const ok = await loadSessions();
+      setLiveStatus(ok ? "已連線" : "同步失敗", ok ? "online" : "warning");
+    })();
+
+    try {
+      await syncInFlight;
+    } finally {
+      syncInFlight = null;
+    }
+  }
+
   setLiveStatus("連線中", "syncing");
 
   eventSource.addEventListener("open", () => {
-    setLiveStatus("已連線", "online");
-    if (initialSyncComplete) {
-      return;
-    }
-
-    initialSyncComplete = true;
-    void loadSessions();
+    void resyncSessions();
   });
 
   eventSource.addEventListener("session", (event) => {
@@ -336,4 +400,4 @@ if (elements.filter) {
 }
 
 subscribeToEvents();
-await Promise.all([loadSetup(), loadSessions()]);
+await loadSetup();

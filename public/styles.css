@@ -147,6 +147,26 @@ body {
   box-shadow: 0 0 0.35rem rgba(132, 166, 210, 0.5);
 }
 
+.status-chip[data-state="idle"] {
+  border-color: rgba(132, 166, 210, 0.36);
+  color: #bed0e7;
+}
+
+.status-chip[data-state="idle"]::before {
+  background: #84a6d2;
+  box-shadow: 0 0 0.35rem rgba(132, 166, 210, 0.5);
+}
+
+.status-chip[data-state="active"] {
+  border-color: rgba(88, 199, 255, 0.56);
+  color: #dff2ff;
+}
+
+.status-chip[data-state="active"]::before {
+  background: var(--accent);
+  box-shadow: 0 0 0.45rem rgba(88, 199, 255, 0.75);
+}
+
 .status-chip[data-state="online"] {
   border-color: rgba(108, 255, 204, 0.56);
 }
