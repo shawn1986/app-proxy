@@ -134,6 +134,8 @@ npm run dev
 
 ## Android 設定
 
+如果你需要較完整的 Android 憑證安裝、信任設定與 HTTPS 排錯說明，請參考 [Android 憑證安裝與排錯手冊](manual/android-certificate-setup.md)。
+
 ### 1. 啟動應用程式
 
 執行：
