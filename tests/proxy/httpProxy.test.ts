@@ -1,0 +1,245 @@
+import http from "node:http";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { ProxyAgent, fetch } from "undici";
+import { openDatabase } from "../../src/storage/db.js";
+import { createSessionRepository } from "../../src/storage/sessionRepository.js";
+import { createSessionEventBus } from "../../src/realtime/sessionEventBus.js";
+import { startProxyServer } from "../../src/proxy/createProxyServer.js";
+
+const RESPONSE_PREVIEW_LIMIT = 4096;
+
+async function getUnusedPort() {
+  const server = http.createServer();
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const port = (server.address() as { port: number }).port;
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return port;
+}
+
+describe("HTTP proxy capture", () => {
+  const cleanups: Array<() => Promise<void> | void> = [];
+
+  afterEach(async () => {
+    while (cleanups.length > 0) {
+      await cleanups.pop()?.();
+    }
+  });
+
+  it("captures an HTTP request and response", async () => {
+    const upstream = http.createServer((_, res) => {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ ok: true }));
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, resolve));
+    cleanups.push(() => new Promise<void>((resolve) => upstream.close(() => resolve())));
+
+    const dir = mkdtempSync(join(tmpdir(), "proxy-http-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+
+    const db = openDatabase(join(dir, "sessions.db"));
+    cleanups.push(() => {
+      db.close();
+    });
+    const repository = createSessionRepository(db);
+    const bus = createSessionEventBus();
+    const proxy = await startProxyServer({
+      port: 0,
+      repository,
+      bus,
+      certificateDir: join(dir, "certs"),
+      bodyDir: join(dir, "bodies"),
+    });
+    cleanups.push(() => proxy.close());
+
+    const upstreamPort = (upstream.address() as { port: number }).port;
+    const proxyAgent = new ProxyAgent(`http://127.0.0.1:${proxy.port}`);
+    const requestBody = JSON.stringify({ hello: "proxy" });
+    const response = await fetch(`http://127.0.0.1:${upstreamPort}/hello`, {
+      method: "POST",
+      body: requestBody,
+      headers: {
+        "content-type": "application/json",
+      },
+      dispatcher: proxyAgent,
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true });
+
+    const sessions = repository.listSessions();
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]?.scheme).toBe("http");
+    expect(sessions[0]?.path).toBe("/hello");
+    expect(sessions[0]?.responseStatus).toBe(200);
+    expect(sessions[0]?.requestBodyPath).toBeTruthy();
+    expect(sessions[0]?.responseBodyPath).toBeTruthy();
+    expect(existsSync(sessions[0]!.requestBodyPath!)).toBe(true);
+    expect(existsSync(sessions[0]!.responseBodyPath!)).toBe(true);
+    expect(readFileSync(sessions[0]!.requestBodyPath!, "utf8")).toBe(requestBody);
+    expect(readFileSync(sessions[0]!.responseBodyPath!, "utf8")).toBe("{\"ok\":true}");
+  });
+
+  it("captures upstream request failures with error details", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "proxy-http-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+
+    const db = openDatabase(join(dir, "sessions.db"));
+    cleanups.push(() => {
+      db.close();
+    });
+    const repository = createSessionRepository(db);
+    const bus = createSessionEventBus();
+    const proxy = await startProxyServer({
+      port: 0,
+      repository,
+      bus,
+      certificateDir: join(dir, "certs"),
+      bodyDir: join(dir, "bodies"),
+    });
+    cleanups.push(() => proxy.close());
+
+    const upstreamPort = await getUnusedPort();
+    const proxyAgent = new ProxyAgent(`http://127.0.0.1:${proxy.port}`);
+    const response = await fetch(`http://127.0.0.1:${upstreamPort}/fail`, {
+      dispatcher: proxyAgent,
+    });
+
+    expect(response.status).toBe(504);
+
+    const sessions = repository.listSessions();
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]?.path).toBe("/fail");
+    expect(sessions[0]?.errorCode).toBe("PROXY_TO_SERVER_REQUEST_ERROR");
+    expect(sessions[0]?.errorMessage).toContain("ECONNREFUSED");
+    expect(sessions[0]?.responseStatus).toBeNull();
+  });
+
+  it("does not let subscriber failures break proxy traffic", async () => {
+    const upstream = http.createServer((_, res) => {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ ok: true }));
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, resolve));
+    cleanups.push(() => new Promise<void>((resolve) => upstream.close(() => resolve())));
+
+    const dir = mkdtempSync(join(tmpdir(), "proxy-http-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+
+    const db = openDatabase(join(dir, "sessions.db"));
+    cleanups.push(() => {
+      db.close();
+    });
+    const repository = createSessionRepository(db);
+    const bus = createSessionEventBus();
+    const unsubscribe = bus.subscribe(() => {
+      throw new Error("subscriber failed");
+    });
+    cleanups.push(() => {
+      unsubscribe();
+    });
+    const proxy = await startProxyServer({
+      port: 0,
+      repository,
+      bus,
+      certificateDir: join(dir, "certs"),
+      bodyDir: join(dir, "bodies"),
+    });
+    cleanups.push(() => proxy.close());
+
+    const upstreamPort = (upstream.address() as { port: number }).port;
+    const proxyAgent = new ProxyAgent(`http://127.0.0.1:${proxy.port}`);
+    const response = await fetch(`http://127.0.0.1:${upstreamPort}/safe`, {
+      dispatcher: proxyAgent,
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true });
+    expect(repository.listSessions()).toHaveLength(1);
+  });
+
+  it("binds to a configured host so LAN clients can reach the proxy", async () => {
+    const upstream = http.createServer((_, res) => {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ ok: true }));
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, resolve));
+    cleanups.push(() => new Promise<void>((resolve) => upstream.close(() => resolve())));
+
+    const dir = mkdtempSync(join(tmpdir(), "proxy-http-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+
+    const db = openDatabase(join(dir, "sessions.db"));
+    cleanups.push(() => {
+      db.close();
+    });
+    const repository = createSessionRepository(db);
+    const bus = createSessionEventBus();
+    const proxy = await startProxyServer({
+      port: 0,
+      host: "0.0.0.0",
+      repository,
+      bus,
+      certificateDir: join(dir, "certs"),
+      bodyDir: join(dir, "bodies"),
+    });
+    cleanups.push(() => proxy.close());
+
+    const upstreamPort = (upstream.address() as { port: number }).port;
+    const proxyAgent = new ProxyAgent(`http://127.0.0.1:${proxy.port}`);
+    const response = await fetch(`http://127.0.0.1:${upstreamPort}/lan`, {
+      dispatcher: proxyAgent,
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true });
+    expect(proxy.host).toBe("0.0.0.0");
+    expect(repository.listSessions()[0]?.path).toBe("/lan");
+  });
+
+  it("caps response body previews to a fixed size", async () => {
+    const body = "a".repeat(RESPONSE_PREVIEW_LIMIT * 2);
+    const upstream = http.createServer((_, res) => {
+      res.setHeader("content-type", "text/plain");
+      res.end(body);
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, resolve));
+    cleanups.push(() => new Promise<void>((resolve) => upstream.close(() => resolve())));
+
+    const dir = mkdtempSync(join(tmpdir(), "proxy-http-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+
+    const db = openDatabase(join(dir, "sessions.db"));
+    cleanups.push(() => {
+      db.close();
+    });
+    const repository = createSessionRepository(db);
+    const bus = createSessionEventBus();
+    const proxy = await startProxyServer({
+      port: 0,
+      repository,
+      bus,
+      certificateDir: join(dir, "certs"),
+      bodyDir: join(dir, "bodies"),
+    });
+    cleanups.push(() => proxy.close());
+
+    const upstreamPort = (upstream.address() as { port: number }).port;
+    const proxyAgent = new ProxyAgent(`http://127.0.0.1:${proxy.port}`);
+    const response = await fetch(`http://127.0.0.1:${upstreamPort}/large`, {
+      dispatcher: proxyAgent,
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe(body);
+
+    const session = repository.listSessions()[0];
+    expect(session?.responseBodyPreview).toHaveLength(RESPONSE_PREVIEW_LIMIT);
+    expect(session?.responseBodyPreview).toBe(body.slice(0, RESPONSE_PREVIEW_LIMIT));
+    expect(session?.responseBodyPath).toBeTruthy();
+    expect(existsSync(session!.responseBodyPath!)).toBe(true);
+    expect(readFileSync(session!.responseBodyPath!, "utf8")).toBe(body);
+  });
+});
