@@ -84,8 +84,12 @@ describe("session and setup routes", () => {
     const response = await app.inject({ method: "GET", url: "/" });
 
     expect(response.statusCode).toBe(200);
-    expect(response.body).toContain("Android Proxy Dashboard");
-    expect(response.body).toContain("Session List");
+    expect(response.body).toContain("Android 代理監控台");
+    expect(response.body).toContain("流量事件");
+    expect(response.body).toContain("封包剖析");
+    expect(response.body).toContain("節點診斷");
+    expect(response.body).toContain('id="live-status"');
+    expect(response.body).toContain('id="session-count-chip"');
   });
 
   it("exposes the SSE endpoint", async () => {
