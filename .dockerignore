@@ -1,0 +1,8 @@
+node_modules
+.git
+.worktrees
+.superpowers
+.data
+docs
+coverage
+logs
