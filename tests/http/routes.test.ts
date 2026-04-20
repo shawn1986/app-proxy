@@ -90,6 +90,12 @@ describe("session and setup routes", () => {
     expect(response.body).toContain("節點診斷");
     expect(response.body).toContain('id="live-status"');
     expect(response.body).toContain('id="session-count-chip"');
+    expect(response.body).toContain('class="shell-backdrop"');
+    expect(response.body).toContain('class="command-bar"');
+    expect(response.body).toContain('class="status-strip"');
+    expect(response.body).toContain('class="workspace"');
+    expect(response.body).toContain("events-panel");
+    expect(response.body).toContain('class="inspector-panel"');
   });
 
   it("exposes the SSE endpoint", async () => {
