@@ -126,5 +126,5 @@ if (isDirectRun(import.meta.url, process.argv[1])) {
   process.once("SIGTERM", () => {
     void closeApp();
   });
-  await app.listen({ host: "127.0.0.1", port: appConfig.httpPort });
+  await app.listen({ host: appConfig.httpHost, port: appConfig.httpPort });
 }
