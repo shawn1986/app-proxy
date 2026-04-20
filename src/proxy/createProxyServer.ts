@@ -1,6 +1,7 @@
 import https from "node:https";
 import { mkdirSync } from "node:fs";
 import type { AddressInfo } from "node:net";
+import { networkInterfaces } from "node:os";
 import { StringDecoder } from "node:string_decoder";
 import { Proxy, type IContext } from "http-mitm-proxy";
 import {
@@ -23,6 +24,41 @@ import { createPendingSession, finalizePendingSession } from "./sessionCollector
 const BODY_PREVIEW_LIMIT = 4096;
 
 type DecodeStream = BrotliDecompress | Gunzip | Inflate;
+
+function normalizeHost(value: string | undefined) {
+  return value?.trim().replace(/^\[|\]$/g, "").toLowerCase() ?? "";
+}
+
+function parseTargetHostPort(requestHost: string | undefined, fallbackPort: number) {
+  const normalized = normalizeHost(requestHost);
+  if (!requestHost) {
+    return { host: normalized, port: fallbackPort };
+  }
+
+  try {
+    const parsed = new URL(`http://${requestHost}`);
+    return {
+      host: normalizeHost(parsed.hostname),
+      port: Number(parsed.port || fallbackPort),
+    };
+  } catch {
+    return { host: normalized, port: fallbackPort };
+  }
+}
+
+function getLocalInterfaceHosts() {
+  const hosts = new Set<string>();
+
+  for (const addresses of Object.values(networkInterfaces())) {
+    for (const address of addresses ?? []) {
+      if (address.address) {
+        hosts.add(normalizeHost(address.address));
+      }
+    }
+  }
+
+  return hosts;
+}
 
 function createDecodeStream(contentEncoding: string | undefined): DecodeStream | null {
   if (contentEncoding === "gzip") {
@@ -184,6 +220,15 @@ export async function startProxyServer({
   const bodyStore = createBodyStore(bodyDir);
   const proxy = new Proxy();
   const activeSessions = new WeakMap<IContext, ActiveSession>();
+  const selfHosts = getLocalInterfaceHosts();
+  let activeProxyHost = host;
+  let activeProxyPort = port;
+
+  selfHosts.add(normalizeHost(host));
+  selfHosts.add("127.0.0.1");
+  selfHosts.add("localhost");
+  selfHosts.add("0.0.0.0");
+  selfHosts.add("::1");
 
   proxy.onError((ctx, error, errorCode) => {
     if (!ctx) {
@@ -225,7 +270,31 @@ export async function startProxyServer({
     const startedAt = Date.now();
     const request = ctx.clientToProxyRequest;
     const scheme = ctx.isSSL ? "https" : "http";
-    const origin = `${scheme}://${request.headers.host ?? "localhost"}`;
+    const hostHeader = request.headers.host?.toString();
+    const target = parseTargetHostPort(hostHeader, scheme === "https" ? 443 : 80);
+    if (target.port === activeProxyPort && selfHosts.has(target.host)) {
+      console.error({
+        event: "PROXY_SELF_TARGET_BLOCKED",
+        clientIp: request.socket.remoteAddress ?? "",
+        method: request.method ?? "GET",
+        hostHeader: hostHeader ?? "",
+        requestUrl: request.url ?? "",
+        targetHost: target.host,
+        targetPort: target.port,
+        userAgent: request.headers["user-agent"]?.toString() ?? "",
+        proxyHost: activeProxyHost,
+        proxyPort: activeProxyPort,
+      });
+
+      ctx.proxyToClientResponse.writeHead(508, {
+        "content-type": "text/plain; charset=utf-8",
+      });
+      ctx.proxyToClientResponse.end(
+        "Blocked proxy loop: request target resolves to the proxy itself.",
+      );
+      return;
+    }
+    const origin = `${scheme}://${hostHeader ?? "localhost"}`;
     const url = new URL(request.url ?? "/", origin);
     const active: ActiveSession = {
       pending: createPendingSession({
@@ -353,6 +422,9 @@ export async function startProxyServer({
     address && typeof address !== "string"
       ? (address as AddressInfo).address
       : host;
+  activeProxyHost = resolvedHost;
+  activeProxyPort = proxy.httpPort;
+  selfHosts.add(normalizeHost(resolvedHost));
 
   return {
     port: proxy.httpPort,

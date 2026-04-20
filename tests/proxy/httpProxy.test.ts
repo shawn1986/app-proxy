@@ -2,7 +2,7 @@ import http from "node:http";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProxyAgent, fetch } from "undici";
 import { openDatabase } from "../../src/storage/db.js";
 import { createSessionRepository } from "../../src/storage/sessionRepository.js";
@@ -241,5 +241,51 @@ describe("HTTP proxy capture", () => {
     expect(session?.responseBodyPath).toBeTruthy();
     expect(existsSync(session!.responseBodyPath!)).toBe(true);
     expect(readFileSync(session!.responseBodyPath!, "utf8")).toBe(body);
+  });
+
+  it("blocks self-target requests and does not persist sessions", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "proxy-http-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+
+    const db = openDatabase(join(dir, "sessions.db"));
+    cleanups.push(() => {
+      db.close();
+    });
+    const repository = createSessionRepository(db);
+    const bus = createSessionEventBus();
+    const proxy = await startProxyServer({
+      port: 0,
+      host: "127.0.0.1",
+      repository,
+      bus,
+      certificateDir: join(dir, "certs"),
+      bodyDir: join(dir, "bodies"),
+    });
+    cleanups.push(() => proxy.close());
+
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+    cleanups.push(() => stderr.mockRestore());
+
+    const proxyAgent = new ProxyAgent(`http://127.0.0.1:${proxy.port}`);
+    const response = await fetch(`http://127.0.0.1:${proxy.port}/loop`, {
+      dispatcher: proxyAgent,
+      headers: {
+        "user-agent": "self-target-test",
+      },
+    });
+
+    expect(response.status).toBe(508);
+    expect(await response.text()).toContain("proxy loop");
+    expect(repository.listSessions()).toHaveLength(0);
+    expect(stderr).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "PROXY_SELF_TARGET_BLOCKED",
+        method: "GET",
+        targetHost: "127.0.0.1",
+        targetPort: proxy.port,
+        userAgent: "self-target-test",
+        proxyPort: proxy.port,
+      }),
+    );
   });
 });
