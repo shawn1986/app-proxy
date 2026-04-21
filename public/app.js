@@ -343,7 +343,7 @@ function triggerSessionFlash(sessionId) {
 
 function prependSession(session) {
   const hadSelection = state.selectedId !== null;
-  state.sessions = mergeSessions([session], state.sessions);
+  state.sessions = mergeSessions(state.sessions, [session]);
   triggerSessionFlash(session.id);
   renderList();
   if (!hadSelection) {
