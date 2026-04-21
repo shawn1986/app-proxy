@@ -39,6 +39,7 @@ const NOISE_CONNECT_HOSTS = [
 ];
 
 const NOISE_PATHS = [/^\/generate_204$/, /^\/gen_204$/, /^\/success\.txt$/];
+const SUPPORTED_TARGET_PROTOCOLS = new Set(["http:", "https:"]);
 const PROXY_ONLY_REQUEST_HEADERS = new Set([
   "connection",
   "keep-alive",
@@ -279,7 +280,26 @@ export async function startTunnelProxyServer({
 
   const server = http.createServer((request, response) => {
     const startedAt = Date.now();
-    const targetUrl = toAbsoluteTargetUrl(request);
+    let targetUrl: URL;
+    try {
+      targetUrl = toAbsoluteTargetUrl(request);
+    } catch {
+      response.writeHead(400, {
+        "content-type": "text/plain; charset=utf-8",
+        connection: "close",
+      });
+      response.end("Invalid request target URL.");
+      return;
+    }
+    if (!SUPPORTED_TARGET_PROTOCOLS.has(targetUrl.protocol)) {
+      response.writeHead(400, {
+        "content-type": "text/plain; charset=utf-8",
+        connection: "close",
+      });
+      response.end("Unsupported request target protocol.");
+      return;
+    }
+
     const targetPort = Number(targetUrl.port || (targetUrl.protocol === "https:" ? 443 : 80));
     const targetHost = normalizeHost(targetUrl.hostname);
 
