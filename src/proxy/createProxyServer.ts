@@ -20,6 +20,7 @@ import { createBodyStore } from "../storage/bodyStore.js";
 import type { createSessionRepository } from "../storage/sessionRepository.js";
 import type { NewSessionRecord } from "../sessions/types.js";
 import { createPendingSession, finalizePendingSession } from "./sessionCollector.js";
+import { startTunnelProxyServer } from "./startTunnelProxyServer.js";
 
 const BODY_PREVIEW_LIMIT = 4096;
 
@@ -201,12 +202,15 @@ function storeSession(
 type ProxyDeps = {
   port: number;
   host?: string;
+  httpsMode?: HttpsMode;
   repository: ReturnType<typeof createSessionRepository>;
   bus: ReturnType<typeof createSessionEventBus>;
   certificateDir: string;
   bodyDir: string;
   upstreamCaCertificates?: string[];
 };
+
+export type HttpsMode = "mitm" | "tunnel";
 
 type ActiveSession = {
   pending: NewSessionRecord;
@@ -223,12 +227,22 @@ type ActiveSession = {
 export async function startProxyServer({
   port,
   host = "127.0.0.1",
+  httpsMode = "tunnel",
   repository,
   bus,
   certificateDir,
   bodyDir,
   upstreamCaCertificates,
 }: ProxyDeps) {
+  if (httpsMode === "tunnel") {
+    return startTunnelProxyServer({
+      port,
+      host,
+      repository,
+      bus,
+    });
+  }
+
   const caStore = resolveCaStorePaths(certificateDir);
   mkdirSync(caStore.certificateDir, { recursive: true });
   mkdirSync(bodyDir, { recursive: true });

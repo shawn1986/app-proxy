@@ -397,6 +397,28 @@ pre {
   margin-top: 0.35rem;
 }
 
+.mode-toggle {
+  border: 1px solid rgba(108, 255, 204, 0.6);
+  border-radius: 0.62rem;
+  padding: 0.52rem 0.7rem;
+  color: #dffbff;
+  background: rgba(7, 28, 30, 0.9);
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease;
+}
+
+.mode-toggle:hover {
+  border-color: rgba(88, 199, 255, 0.7);
+  box-shadow: 0 0 0 1px rgba(88, 199, 255, 0.22);
+  transform: translateY(-1px);
+}
+
+.mode-toggle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(88, 199, 255, 0.25);
+}
+
 a {
   color: var(--accent);
 }

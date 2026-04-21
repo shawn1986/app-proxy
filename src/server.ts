@@ -6,7 +6,7 @@ import { appConfig, resolveAppPaths } from "./config.js";
 import { registerHealthRoutes } from "./http/routes/healthRoutes.js";
 import { registerSessionRoutes } from "./http/routes/sessionRoutes.js";
 import { registerSetupRoutes } from "./http/routes/setupRoutes.js";
-import { startProxyServer } from "./proxy/createProxyServer.js";
+import { startProxyServer, type HttpsMode } from "./proxy/createProxyServer.js";
 import { createSessionEventBus } from "./realtime/sessionEventBus.js";
 import { openDatabase } from "./storage/db.js";
 import { createSessionRepository } from "./storage/sessionRepository.js";
@@ -17,12 +17,14 @@ export async function buildApp(
     dataDir: string;
     proxyPort: number;
     proxyHost: string;
+    httpsMode: HttpsMode;
     startProxy: boolean;
   }> = {},
 ) {
   const paths = resolveAppPaths(overrides.dataDir ?? appConfig.dataDir);
   const proxyPort = overrides.proxyPort ?? appConfig.proxyPort;
   const proxyHost = overrides.proxyHost ?? appConfig.proxyHost;
+  let httpsMode = overrides.httpsMode ?? appConfig.httpsMode;
   const startProxy = overrides.startProxy ?? false;
   const moduleDir = resolve(fileURLToPath(new URL(".", import.meta.url)));
   const publicDir = join(moduleDir, "..", "public");
@@ -89,12 +91,41 @@ export async function buildApp(
 
   await registerHealthRoutes(app);
   await registerSessionRoutes(app, repository);
-  await registerSetupRoutes(app, { proxyPort, certificateDir: paths.certificateDir });
+  await registerSetupRoutes(app, {
+    proxyPort,
+    certificateDir: paths.certificateDir,
+    getHttpsMode: () => httpsMode,
+    setHttpsMode: async (nextMode) => {
+      if (nextMode === httpsMode) {
+        return;
+      }
+
+      httpsMode = nextMode;
+      if (!startProxy) {
+        return;
+      }
+
+      if (proxyRuntime) {
+        await proxyRuntime.close();
+      }
+
+      proxyRuntime = await startProxyServer({
+        port: proxyPort,
+        host: proxyHost,
+        httpsMode,
+        repository,
+        bus,
+        certificateDir: paths.certificateDir,
+        bodyDir: paths.bodyDir,
+      });
+    },
+  });
 
   if (startProxy) {
     proxyRuntime = await startProxyServer({
       port: proxyPort,
       host: proxyHost,
+      httpsMode,
       repository,
       bus,
       certificateDir: paths.certificateDir,

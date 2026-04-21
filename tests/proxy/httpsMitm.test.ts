@@ -56,6 +56,7 @@ describe("HTTPS MITM capture", () => {
     const bus = createSessionEventBus();
     const proxy = await startProxyServer({
       port: 0,
+      httpsMode: "mitm",
       repository,
       bus,
       certificateDir: join(dir, "certs"),
@@ -130,6 +131,7 @@ describe("HTTPS MITM capture", () => {
     const bus = createSessionEventBus();
     const proxy = await startProxyServer({
       port: 0,
+      httpsMode: "mitm",
       repository,
       bus,
       certificateDir: join(dir, "certs"),
