@@ -540,11 +540,14 @@ export async function startTunnelProxyServer({
   });
 
   await new Promise<void>((resolve, reject) => {
-    server.listen({ port, host }, (error?: Error) => {
-      if (error) {
-        reject(error);
-        return;
-      }
+    const onError = (error: Error) => {
+      server.off("error", onError);
+      reject(error);
+    };
+
+    server.once("error", onError);
+    server.listen({ port, host }, () => {
+      server.off("error", onError);
       resolve();
     });
   });
