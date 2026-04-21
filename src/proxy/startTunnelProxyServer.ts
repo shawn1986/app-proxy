@@ -343,13 +343,32 @@ export async function startTunnelProxyServer({
               contentType: upstreamResponse.headers["content-type"]?.toString(),
             })
           : null;
+        let waitingForDrain = false;
+        const onDrain = () => {
+          waitingForDrain = false;
+          upstreamResponse.resume();
+        };
+
+        response.once("close", () => {
+          if (waitingForDrain) {
+            response.off("drain", onDrain);
+          }
+        });
 
         upstreamResponse.on("data", (chunk) => {
           const buffer = Buffer.from(chunk);
           if (responseCapture) {
             void responseCapture.write(buffer).catch(() => {});
           }
-          response.write(buffer);
+          if (response.write(buffer)) {
+            return;
+          }
+
+          if (!waitingForDrain) {
+            waitingForDrain = true;
+            upstreamResponse.pause();
+            response.once("drain", onDrain);
+          }
         });
 
         upstreamResponse.on("end", async () => {
