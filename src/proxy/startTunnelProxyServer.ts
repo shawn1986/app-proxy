@@ -353,6 +353,10 @@ export async function startTunnelProxyServer({
           if (waitingForDrain) {
             response.off("drain", onDrain);
           }
+          if (!response.writableEnded) {
+            upstreamResponse.destroy();
+            upstream.destroy();
+          }
         });
 
         upstreamResponse.on("data", (chunk) => {
@@ -577,9 +581,13 @@ export async function startTunnelProxyServer({
       storeConnectError("PROXY_TO_SERVER_REQUEST_ERROR", error.message);
     });
 
-    clientSocket.on("error", () => {
+    const destroyUpstreamSocket = () => {
       upstreamSocket.destroy();
-    });
+    };
+
+    clientSocket.on("error", destroyUpstreamSocket);
+    clientSocket.on("end", destroyUpstreamSocket);
+    clientSocket.on("close", destroyUpstreamSocket);
   });
 
   await new Promise<void>((resolve, reject) => {
