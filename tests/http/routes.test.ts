@@ -54,7 +54,7 @@ describe("session and setup routes", () => {
 
     expect(setup.statusCode).toBe(200);
     expect(setup.json()).toMatchObject({
-      proxyPort: 18080,
+      proxyPort: 118080,
       certificate: {
         exists: false,
       },

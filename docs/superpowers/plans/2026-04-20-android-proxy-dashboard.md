@@ -836,7 +836,7 @@ import { join } from "node:path";
 
 export const appConfig = {
   httpPort: Number(process.env.APP_PORT ?? 3000),
-  proxyPort: Number(process.env.PROXY_PORT ?? 8080),
+  proxyPort: Number(process.env.PROXY_PORT ?? 18080),
   dataDir: process.env.DATA_DIR ?? ".data",
   certificateDir: join(process.env.DATA_DIR ?? ".data", "certs"),
   bodyDir: join(process.env.DATA_DIR ?? ".data", "bodies"),
@@ -1014,7 +1014,7 @@ describe("session and setup routes", () => {
 
     expect(setup.statusCode).toBe(200);
     expect(setup.json()).toMatchObject({
-      proxyPort: 8080,
+      proxyPort: 18080,
       certificate: {
         exists: false,
       },
@@ -1579,7 +1579,7 @@ npm install
 npm run dev
 ~~~
 
-Open `http://127.0.0.1:3000` and set the Android Wi-Fi proxy to `your-computer-ip:8080`.
+Open `http://127.0.0.1:3000` and set the Android Wi-Fi proxy to `your-computer-ip:18080`.
 
 ## Android HTTPS setup
 
@@ -1624,8 +1624,8 @@ Run this after Task 6:
 
 1. Start the app with `npm run dev`.
 2. Open `http://127.0.0.1:3000`.
-3. Confirm the setup pane shows `proxyPort: 8080`.
-4. Configure an Android device on the same Wi-Fi network to use the computer's IP address with port `8080`.
+3. Confirm the setup pane shows `proxyPort: 18080`.
+4. Configure an Android device on the same Wi-Fi network to use the computer's IP address with port `18080`.
 5. Download and install the CA certificate from `/api/certificate`.
 6. Launch a test app you control.
 7. Confirm new sessions appear in the list and can be opened in the detail pane.

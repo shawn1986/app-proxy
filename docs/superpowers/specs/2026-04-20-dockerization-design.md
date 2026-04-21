@@ -44,7 +44,7 @@ This is the best balance for the current project because:
 The container runs one process:
 
 - dashboard on port `3000`
-- proxy on port `8080`
+- proxy on port `18080`
 
 The dashboard remains accessed from the host machine at `http://127.0.0.1:3000`.
 
@@ -54,7 +54,7 @@ Default runtime environment inside the container:
 
 - `APP_HOST=0.0.0.0`
 - `APP_PORT=3000`
-- `PROXY_PORT=8080`
+- `PROXY_PORT=18080`
 - `PROXY_HOST=0.0.0.0`
 - `DATA_DIR=/app/.data`
 
@@ -80,7 +80,7 @@ Use a Node.js base image and a simple runtime-focused layout:
 2. copy `package.json` and `package-lock.json`
 3. run `npm ci`
 4. copy source files into the image
-5. expose ports `3000` and `8080`
+5. expose ports `3000` and `18080`
 6. run the app with a non-watch startup command
 
 The current `dev` script uses `tsx watch`, which is not appropriate as the default container process. Add a `start` script that runs `tsx src/server.ts`, and make the container use that command.
@@ -92,11 +92,11 @@ The current `dev` script uses `tsx watch`, which is not appropriate as the defau
 - build from the current project directory
 - published ports:
   - `3000:3000`
-  - `8080:8080`
+  - `18080:18080`
 - environment:
   - `APP_HOST=0.0.0.0`
   - `APP_PORT=3000`
-  - `PROXY_PORT=8080`
+  - `PROXY_PORT=18080`
   - `PROXY_HOST=0.0.0.0`
   - `DATA_DIR=/app/.data`
 - one named volume mounted at `/app/.data`

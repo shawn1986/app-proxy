@@ -15,7 +15,7 @@ const appPaths = resolveAppPaths(process.env.DATA_DIR ?? ".data");
 export const appConfig = {
   httpHost: process.env.APP_HOST ?? "127.0.0.1",
   httpPort: Number(process.env.APP_PORT ?? 3000),
-  proxyPort: Number(process.env.PROXY_PORT ?? 18080),
+  proxyPort: Number(process.env.PROXY_PORT ?? 118080),
   proxyHost: process.env.PROXY_HOST ?? "0.0.0.0",
   dataDir: appPaths.dataDir,
   certificateDir: appPaths.certificateDir,

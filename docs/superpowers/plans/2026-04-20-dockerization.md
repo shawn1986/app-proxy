@@ -82,7 +82,7 @@ const appPaths = resolveAppPaths(process.env.DATA_DIR ?? ".data");
 export const appConfig = {
   httpHost: process.env.APP_HOST ?? "127.0.0.1",
   httpPort: Number(process.env.APP_PORT ?? 3000),
-  proxyPort: Number(process.env.PROXY_PORT ?? 8080),
+  proxyPort: Number(process.env.PROXY_PORT ?? 18080),
   proxyHost: process.env.PROXY_HOST ?? "0.0.0.0",
   dataDir: appPaths.dataDir,
   certificateDir: appPaths.certificateDir,
@@ -162,10 +162,10 @@ COPY . .
 ENV APP_HOST=0.0.0.0
 ENV APP_PORT=3000
 ENV PROXY_HOST=0.0.0.0
-ENV PROXY_PORT=8080
+ENV PROXY_PORT=18080
 ENV DATA_DIR=/app/.data
 
-EXPOSE 3000 8080
+EXPOSE 3000 18080
 
 CMD ["npm", "run", "start"]
 ```
@@ -192,12 +192,12 @@ services:
       context: .
     ports:
       - "3000:3000"
-      - "8080:8080"
+      - "18080:18080"
     environment:
       APP_HOST: 0.0.0.0
       APP_PORT: 3000
       PROXY_HOST: 0.0.0.0
-      PROXY_PORT: 8080
+      PROXY_PORT: 18080
       DATA_DIR: /app/.data
     volumes:
       - app-proxy-data:/app/.data
@@ -247,7 +247,7 @@ docker compose up --build
 This publishes:
 
 - dashboard on `http://127.0.0.1:3000`
-- proxy on `host-lan-ip:8080`
+- proxy on `host-lan-ip:18080`
 
 Persistent data lives in the Compose volume mounted at `/app/.data`, including:
 
