@@ -31,6 +31,12 @@ const NOISE_HOSTS = [
   /msftconnecttest\.com$/,
   /detectportal\.firefox\.com$/,
 ];
+const NOISE_CONNECT_HOSTS = [
+  /connectivitycheck\.gstatic\.com$/,
+  /captive\.apple\.com$/,
+  /msftconnecttest\.com$/,
+  /detectportal\.firefox\.com$/,
+];
 
 const NOISE_PATHS = [/^\/generate_204$/, /^\/gen_204$/, /^\/success\.txt$/];
 const PROXY_ONLY_REQUEST_HEADERS = new Set([
@@ -92,8 +98,8 @@ function isNoiseRequest(host: string, path: string): boolean {
   return NOISE_HOSTS.some((re) => re.test(host)) && NOISE_PATHS.some((re) => re.test(path));
 }
 
-function isNoiseConnectHost(host: string): boolean {
-  return NOISE_HOSTS.some((re) => re.test(host));
+export function isNoiseConnectHost(host: string): boolean {
+  return NOISE_CONNECT_HOSTS.some((re) => re.test(host));
 }
 
 function toAbsoluteTargetUrl(request: http.IncomingMessage) {

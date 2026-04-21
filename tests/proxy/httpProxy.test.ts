@@ -9,6 +9,7 @@ import { openDatabase } from "../../src/storage/db.js";
 import { createSessionRepository } from "../../src/storage/sessionRepository.js";
 import { createSessionEventBus } from "../../src/realtime/sessionEventBus.js";
 import { startProxyServer } from "../../src/proxy/createProxyServer.js";
+import { isNoiseConnectHost } from "../../src/proxy/startTunnelProxyServer.js";
 
 const RESPONSE_PREVIEW_LIMIT = 4096;
 
@@ -461,5 +462,12 @@ describe("HTTP proxy capture", () => {
     const session = await waitForSession(repository);
     expect(session.path).toBe("/early-response");
     expect(session.responseStatus).toBe(413);
+  });
+
+  it("filters only dedicated probe hosts for CONNECT noise suppression", () => {
+    expect(isNoiseConnectHost("connectivitycheck.gstatic.com")).toBe(true);
+    expect(isNoiseConnectHost("detectportal.firefox.com")).toBe(true);
+    expect(isNoiseConnectHost("play.googleapis.com")).toBe(false);
+    expect(isNoiseConnectHost("clients3.google.com")).toBe(false);
   });
 });
