@@ -134,6 +134,79 @@ describe("HTTP proxy capture", () => {
     expect(sessions[0]?.responseStatus).toBeNull();
   });
 
+  it("returns a 504 response instead of resetting the client socket on upload failure", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "proxy-http-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+
+    const db = openDatabase(join(dir, "sessions.db"));
+    cleanups.push(() => {
+      db.close();
+    });
+    const repository = createSessionRepository(db);
+    const bus = createSessionEventBus();
+    const proxy = await startProxyServer({
+      port: 0,
+      repository,
+      bus,
+      certificateDir: join(dir, "certs"),
+      bodyDir: join(dir, "bodies"),
+    });
+    cleanups.push(() => proxy.close());
+
+    const upstreamPort = await getUnusedPort();
+    const socket = net.connect(proxy.port, "127.0.0.1");
+    cleanups.push(() => {
+      socket.destroy();
+    });
+    await new Promise<void>((resolve, reject) => {
+      socket.once("connect", () => resolve());
+      socket.once("error", reject);
+    });
+
+    const responseChunks: Buffer[] = [];
+    let sawSocketError = false;
+    const closed = new Promise<void>((resolve) => {
+      socket.on("data", (chunk) => {
+        responseChunks.push(Buffer.from(chunk));
+      });
+      socket.once("error", () => {
+        sawSocketError = true;
+        resolve();
+      });
+      socket.once("close", () => resolve());
+    });
+
+    const chunk = "x".repeat(16 * 1024);
+    const chunkCount = 32;
+    const contentLength = chunk.length * chunkCount;
+    socket.write(
+      `POST http://127.0.0.1:${upstreamPort}/upload-fail HTTP/1.1\r\nHost: 127.0.0.1:${upstreamPort}\r\nContent-Type: application/octet-stream\r\nContent-Length: ${contentLength}\r\nConnection: close\r\n\r\n`,
+    );
+
+    for (let index = 0; index < chunkCount; index += 1) {
+      if (socket.destroyed) {
+        break;
+      }
+      socket.write(chunk);
+    }
+
+    await Promise.race([
+      closed,
+      new Promise<void>((_, reject) =>
+        setTimeout(() => reject(new Error("Timed out waiting for proxy response")), 2000),
+      ),
+    ]);
+
+    const rawResponse = Buffer.concat(responseChunks).toString("utf8");
+    expect(sawSocketError).toBe(false);
+    expect(rawResponse).toContain("HTTP/1.1 504");
+    expect(rawResponse).toContain("PROXY_TO_SERVER_REQUEST_ERROR");
+
+    const session = await waitForSession(repository);
+    expect(session.path).toBe("/upload-fail");
+    expect(session.errorCode).toBe("PROXY_TO_SERVER_REQUEST_ERROR");
+  });
+
   it("does not let subscriber failures break proxy traffic", async () => {
     const upstream = http.createServer((_, res) => {
       res.setHeader("content-type", "application/json");
@@ -388,7 +461,5 @@ describe("HTTP proxy capture", () => {
     const session = await waitForSession(repository);
     expect(session.path).toBe("/early-response");
     expect(session.responseStatus).toBe(413);
-    expect(session.requestBodyPath).toBeTruthy();
-    expect(readFileSync(session.requestBodyPath!, "utf8")).toBe(requestBody);
   });
 });

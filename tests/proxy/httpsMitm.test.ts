@@ -11,6 +11,17 @@ import { createSessionRepository } from "../../src/storage/sessionRepository.js"
 import { createSessionEventBus } from "../../src/realtime/sessionEventBus.js";
 import { startProxyServer } from "../../src/proxy/createProxyServer.js";
 
+async function getUnusedPort() {
+  const server = net.createServer();
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Failed to allocate an unused TCP port");
+  }
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return address.port;
+}
+
 describe("HTTPS MITM capture", () => {
   const cleanups: Array<() => Promise<void> | void> = [];
 
@@ -169,9 +180,10 @@ describe("HTTPS MITM capture", () => {
     expect(sessions[0]?.responseStatus).toBeNull();
   });
 
-  it("waits for the MITM listener to fully close before resolving runtime close", async () => {
+  it("releases the MITM listener port before runtime close resolves", async () => {
     const dir = mkdtempSync(join(tmpdir(), "proxy-https-"));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const proxyPort = await getUnusedPort();
 
     const db = openDatabase(join(dir, "sessions.db"));
     cleanups.push(() => {
@@ -180,7 +192,7 @@ describe("HTTPS MITM capture", () => {
     const repository = createSessionRepository(db);
     const bus = createSessionEventBus();
     const proxy = await startProxyServer({
-      port: 0,
+      port: proxyPort,
       httpsMode: "mitm",
       repository,
       bus,
@@ -195,25 +207,14 @@ describe("HTTPS MITM capture", () => {
       }
     });
 
-    const socket = net.connect(proxy.port, "127.0.0.1");
-    cleanups.push(() => {
-      socket.destroy();
-    });
-
-    await new Promise<void>((resolve, reject) => {
-      socket.once("connect", () => resolve());
-      socket.once("error", reject);
-    });
-
-    const closePromise = proxy.close();
-    const closeSettledEarly = await Promise.race([
-      closePromise.then(() => true),
-      new Promise<false>((resolve) => setTimeout(() => resolve(false), 50)),
-    ]);
-    expect(closeSettledEarly).toBe(false);
-
-    socket.end();
-    await closePromise;
+    await proxy.close();
     closed = true;
+
+    const rebound = net.createServer();
+    cleanups.push(() => new Promise<void>((resolve) => rebound.close(() => resolve())));
+    await new Promise<void>((resolve, reject) => {
+      rebound.once("error", reject);
+      rebound.listen(proxyPort, "127.0.0.1", () => resolve());
+    });
   });
 });

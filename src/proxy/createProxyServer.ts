@@ -466,6 +466,12 @@ export async function startProxyServer({
     port: proxy.httpPort,
     host: resolvedHost,
     close: async () => {
+      const hasActiveListeners =
+        !!proxy.httpServer || !!proxy.httpsServer || Object.keys(proxy.sslServers).length > 0;
+      if (!hasActiveListeners) {
+        return;
+      }
+
       const serversToWait = new Set<HttpServer | HttpsServer>();
       if (proxy.httpServer) {
         serversToWait.add(proxy.httpServer);

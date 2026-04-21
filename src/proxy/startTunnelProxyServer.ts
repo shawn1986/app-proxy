@@ -519,7 +519,10 @@ export async function startTunnelProxyServer({
     upstream.on("error", async (error) => {
       abortRequestForward(error);
       if (!response.headersSent) {
-        response.writeHead(504, { "content-type": "text/plain; charset=utf-8" });
+        response.writeHead(504, {
+          "content-type": "text/plain; charset=utf-8",
+          connection: "close",
+        });
         response.end("Upstream request failed.");
       } else {
         response.destroy();
@@ -559,8 +562,8 @@ export async function startTunnelProxyServer({
       }
       requestForwardError = toForwardError(error);
       upstream.destroy(requestForwardError);
-      if (!request.destroyed) {
-        request.destroy(requestForwardError);
+      if (!request.destroyed && !request.readableEnded) {
+        request.pause();
       }
     };
 
