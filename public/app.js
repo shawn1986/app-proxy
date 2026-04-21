@@ -162,9 +162,7 @@ function setSessionCountChipState(status, title = "") {
 function renderList() {
   const filter = state.filter.trim().toLowerCase();
   const visibleSessions = state.sessions.filter((session) => {
-    if (!filter) {
-      return true;
-    }
+    if (!filter) return true;
 
     const haystack = [
       session.method,

@@ -25,6 +25,21 @@ const BODY_PREVIEW_LIMIT = 4096;
 
 type DecodeStream = BrotliDecompress | Gunzip | Inflate;
 
+const NOISE_HOSTS = [
+  /connectivitycheck\.gstatic\.com$/,
+  /clients\d*\.google\.com$/,
+  /play\.googleapis\.com$/,
+  /captive\.apple\.com$/,
+  /msftconnecttest\.com$/,
+  /detectportal\.firefox\.com$/,
+];
+
+const NOISE_PATHS = [/^\/generate_204$/, /^\/gen_204$/, /^\/success\.txt$/];
+
+function isNoiseRequest(host: string, path: string): boolean {
+  return NOISE_HOSTS.some((re) => re.test(host)) && NOISE_PATHS.some((re) => re.test(path));
+}
+
 function normalizeHost(value: string | undefined) {
   return value?.trim().replace(/^\[|\]$/g, "").toLowerCase() ?? "";
 }
@@ -296,6 +311,11 @@ export async function startProxyServer({
     }
     const origin = `${scheme}://${hostHeader ?? "localhost"}`;
     const url = new URL(request.url ?? "/", origin);
+
+    if (isNoiseRequest(url.host, url.pathname)) {
+      return callback();
+    }
+
     const active: ActiveSession = {
       pending: createPendingSession({
         startedAt: new Date(startedAt).toISOString(),
