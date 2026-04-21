@@ -33,6 +33,17 @@ const NOISE_HOSTS = [
 ];
 
 const NOISE_PATHS = [/^\/generate_204$/, /^\/gen_204$/, /^\/success\.txt$/];
+const PROXY_ONLY_REQUEST_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "proxy-connection",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+]);
 
 type TunnelProxyDeps = {
   port: number;
@@ -91,6 +102,27 @@ function toAbsoluteTargetUrl(request: http.IncomingMessage) {
     return new URL(rawUrl);
   }
   return new URL(rawUrl, `http://${request.headers.host ?? "localhost"}`);
+}
+
+function sanitizeUpstreamRequestHeaders(headers: http.IncomingHttpHeaders) {
+  const sanitized: http.OutgoingHttpHeaders = { ...headers };
+  const connectionHeader = Array.isArray(headers.connection)
+    ? headers.connection.join(",")
+    : (headers.connection ?? "");
+  const connectionTokens = connectionHeader
+    .split(",")
+    .map((token) => token.trim().toLowerCase())
+    .filter(Boolean);
+
+  for (const token of connectionTokens) {
+    delete sanitized[token];
+  }
+
+  for (const header of PROXY_ONLY_REQUEST_HEADERS) {
+    delete sanitized[header];
+  }
+
+  return sanitized;
 }
 
 function storeSession(
@@ -321,6 +353,7 @@ export async function startTunnelProxyServer({
     };
 
     const requestFn = targetUrl.protocol === "https:" ? https.request : http.request;
+    const upstreamRequestHeaders = sanitizeUpstreamRequestHeaders(request.headers);
     const upstream = requestFn(
       {
         protocol: targetUrl.protocol,
@@ -328,7 +361,7 @@ export async function startTunnelProxyServer({
         port: targetPort,
         method: request.method,
         path: `${targetUrl.pathname}${targetUrl.search}`,
-        headers: request.headers,
+        headers: upstreamRequestHeaders,
       },
       (upstreamResponse) => {
         response.writeHead(
@@ -443,40 +476,77 @@ export async function startTunnelProxyServer({
       });
     });
 
-    let waitingForUpstreamDrain = false;
-    const onUpstreamDrain = () => {
-      waitingForUpstreamDrain = false;
-      request.resume();
-    };
-    const clearUpstreamDrainWait = () => {
-      if (!waitingForUpstreamDrain) {
+    let requestForwardError: Error | null = null;
+    let requestForwardPromise: Promise<void> = Promise.resolve();
+    const toForwardError = (error: unknown) =>
+      error instanceof Error ? error : new Error(String(error));
+    const abortRequestForward = (error: unknown) => {
+      if (requestForwardError) {
         return;
       }
-      waitingForUpstreamDrain = false;
-      upstream.off("drain", onUpstreamDrain);
+      requestForwardError = toForwardError(error);
+      upstream.destroy(requestForwardError);
+      if (!request.destroyed) {
+        request.destroy(requestForwardError);
+      }
     };
 
-    request.once("close", clearUpstreamDrainWait);
-    upstream.once("close", clearUpstreamDrainWait);
+    const waitForUpstreamDrain = () =>
+      new Promise<void>((resolve, reject) => {
+        const onDrain = () => {
+          cleanup();
+          resolve();
+        };
+        const onClose = () => {
+          cleanup();
+          reject(new Error("Upstream socket closed before drain."));
+        };
+        const onError = (error: Error) => {
+          cleanup();
+          reject(error);
+        };
+        const cleanup = () => {
+          upstream.off("drain", onDrain);
+          upstream.off("close", onClose);
+          upstream.off("error", onError);
+        };
+
+        upstream.once("drain", onDrain);
+        upstream.once("close", onClose);
+        upstream.once("error", onError);
+      });
 
     request.on("data", (chunk) => {
       const buffer = Buffer.from(chunk);
-      if (requestCapture) {
-        void requestCapture.write(buffer).catch(() => {});
-      }
-      if (upstream.write(buffer)) {
-        return;
-      }
-
-      if (!waitingForUpstreamDrain) {
-        waitingForUpstreamDrain = true;
-        request.pause();
-        upstream.once("drain", onUpstreamDrain);
-      }
+      request.pause();
+      requestForwardPromise = requestForwardPromise.then(async () => {
+        if (requestCapture) {
+          await requestCapture.write(buffer);
+        }
+        if (!upstream.write(buffer)) {
+          await waitForUpstreamDrain();
+        }
+      });
+      requestForwardPromise = requestForwardPromise
+        .then(() => {
+          if (!requestForwardError && !request.destroyed && !request.readableEnded) {
+            request.resume();
+          }
+        })
+        .catch((error) => {
+          abortRequestForward(error);
+          throw error;
+        });
+      void requestForwardPromise.catch(() => {});
     });
 
     request.on("end", async () => {
-      upstream.end();
+      try {
+        await requestForwardPromise;
+      } catch {}
+      if (!upstream.destroyed && !requestForwardError) {
+        upstream.end();
+      }
       try {
         await finalizeRequestCapture();
       } catch {}
