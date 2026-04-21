@@ -1,56 +1,68 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-Hant">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Android Proxy Dashboard</title>
+    <title>Android 代理監控台</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <header class="topbar">
-      <div>
-        <p class="eyebrow">Android Traffic Capture</p>
-        <h1>Android Proxy Dashboard</h1>
+    <div class="shell-backdrop" aria-hidden="true"></div>
+
+    <header class="command-bar">
+      <div class="brand-block">
+        <p class="eyebrow">Android 流量攔截</p>
+        <h1>Android 代理監控台</h1>
       </div>
-      <label class="filter">
-        <span>Filter sessions</span>
+      <label class="command-search">
+        <span>快速篩選</span>
         <input
           id="session-filter"
           type="search"
-          placeholder="Filter by host, path, status, or method"
+          placeholder="輸入網域、路徑、狀態碼或方法"
         />
       </label>
+      <div class="status-strip" aria-live="polite">
+        <span id="proxy-port-chip" class="status-chip">代理埠：載入中</span>
+        <span id="certificate-status" class="status-chip">憑證：待確認</span>
+        <span id="live-status" class="status-chip">即時連線：同步中</span>
+        <span id="session-count-chip" class="status-chip"
+          >事件數：<span id="session-count">載入中...</span></span
+        >
+      </div>
     </header>
 
-    <main class="dashboard">
-      <section class="panel">
+    <main class="workspace">
+      <section class="panel events-panel">
         <div class="panel-header">
-          <h2>Session List</h2>
-          <p id="session-count">Loading sessions...</p>
+          <h2>流量事件</h2>
+          <p>最新封包會即時顯示在事件佇列。</p>
         </div>
         <div id="session-list" class="session-list" aria-live="polite">
-          <p class="placeholder">Waiting for captured sessions.</p>
+          <p class="placeholder">等待攔截到新的流量事件。</p>
         </div>
       </section>
 
-      <section class="panel">
-        <div class="panel-header">
-          <h2>Session Detail</h2>
-          <p>Inspect request and response data.</p>
-        </div>
-        <div id="session-detail" class="detail">
-          <p class="placeholder">Select a session to view request and response details.</p>
-        </div>
-      </section>
+      <section class="inspector-panel">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>封包剖析</h2>
+            <p>選擇事件後檢視請求與回應內容。</p>
+          </div>
+          <div id="session-detail" class="detail">
+            <p class="placeholder">請先從左側選擇一筆流量事件。</p>
+          </div>
+        </section>
 
-      <section class="panel">
-        <div class="panel-header">
-          <h2>Setup &amp; Diagnostics</h2>
-          <p>Proxy and certificate state for your Android device.</p>
-        </div>
-        <div id="setup-detail" class="detail">
-          <p class="placeholder">Loading setup information.</p>
-        </div>
+        <section class="panel">
+          <div class="panel-header">
+            <h2>節點診斷</h2>
+            <p>代理與憑證狀態會顯示在此區塊。</p>
+          </div>
+          <div id="setup-detail" class="detail">
+            <p class="placeholder">正在載入節點診斷資訊。</p>
+          </div>
+        </section>
       </section>
     </main>
 
