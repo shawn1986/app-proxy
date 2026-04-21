@@ -347,7 +347,7 @@ export async function startTunnelProxyServer({
         upstreamResponse.on("data", (chunk) => {
           const buffer = Buffer.from(chunk);
           if (responseCapture) {
-            void responseCapture.write(buffer);
+            void responseCapture.write(buffer).catch(() => {});
           }
           response.write(buffer);
         });
@@ -423,7 +423,7 @@ export async function startTunnelProxyServer({
     request.on("data", (chunk) => {
       const buffer = Buffer.from(chunk);
       if (requestCapture) {
-        void requestCapture.write(buffer);
+        void requestCapture.write(buffer).catch(() => {});
       }
       upstream.write(buffer);
     });
