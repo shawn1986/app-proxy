@@ -1,4 +1,5 @@
 import http from "node:http";
+import net from "node:net";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +18,22 @@ async function getUnusedPort() {
   const port = (server.address() as { port: number }).port;
   await new Promise<void>((resolve) => server.close(() => resolve()));
   return port;
+}
+
+async function waitForSession(
+  repository: ReturnType<typeof createSessionRepository>,
+  timeoutMs = 3000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const session = repository.listSessions()[0];
+    if (session) {
+      return session;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
+
+  throw new Error("Timed out waiting for captured session");
 }
 
 describe("HTTP proxy capture", () => {
@@ -287,5 +304,91 @@ describe("HTTP proxy capture", () => {
         proxyPort: proxy.port,
       }),
     );
+  });
+
+  it("waits for request completion before finalizing tunnel request capture", async () => {
+    const upstream = http.createServer((request, res) => {
+      request.once("data", () => {
+        res.writeHead(413, { "content-type": "text/plain; charset=utf-8" });
+        res.end("too large");
+      });
+      request.resume();
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, resolve));
+    cleanups.push(() => new Promise<void>((resolve) => upstream.close(() => resolve())));
+
+    const dir = mkdtempSync(join(tmpdir(), "proxy-http-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+
+    const db = openDatabase(join(dir, "sessions.db"));
+    cleanups.push(() => {
+      db.close();
+    });
+    const repository = createSessionRepository(db);
+    const bus = createSessionEventBus();
+    const proxy = await startProxyServer({
+      port: 0,
+      repository,
+      bus,
+      certificateDir: join(dir, "certs"),
+      bodyDir: join(dir, "bodies"),
+    });
+    cleanups.push(() => proxy.close());
+
+    const upstreamPort = (upstream.address() as { port: number }).port;
+    const requestBody = "a".repeat(2048) + "b".repeat(2048);
+    const firstChunk = requestBody.slice(0, 1024);
+    const remainingChunk = requestBody.slice(1024);
+
+    const socket = net.connect(proxy.port, "127.0.0.1");
+    cleanups.push(() => {
+      socket.destroy();
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      socket.once("connect", () => resolve());
+      socket.once("error", reject);
+    });
+
+    const responseChunks: Buffer[] = [];
+    let resolveFirstResponse: (() => void) | null = null;
+    const firstResponsePromise = new Promise<void>((resolve) => {
+      resolveFirstResponse = resolve;
+    });
+    const responseDonePromise = new Promise<void>((resolve, reject) => {
+      socket.on("data", (chunk) => {
+        responseChunks.push(Buffer.from(chunk));
+        if (resolveFirstResponse) {
+          resolveFirstResponse();
+          resolveFirstResponse = null;
+        }
+      });
+      socket.once("end", () => resolve());
+      socket.once("error", reject);
+    });
+
+    socket.write(
+      `POST http://127.0.0.1:${upstreamPort}/early-response HTTP/1.1\r\nHost: 127.0.0.1:${upstreamPort}\r\nContent-Type: text/plain\r\nContent-Length: ${requestBody.length}\r\nConnection: keep-alive\r\n\r\n`,
+    );
+    socket.write(firstChunk);
+
+    const sawEarlyResponse = await Promise.race([
+      firstResponsePromise.then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 1000)),
+    ]);
+    expect(sawEarlyResponse).toBe(true);
+
+    socket.write(remainingChunk);
+    socket.end();
+    await responseDonePromise;
+
+    const rawResponse = Buffer.concat(responseChunks).toString("utf8");
+    expect(rawResponse).toContain("413");
+
+    const session = await waitForSession(repository);
+    expect(session.path).toBe("/early-response");
+    expect(session.responseStatus).toBe(413);
+    expect(session.requestBodyPath).toBeTruthy();
+    expect(readFileSync(session.requestBodyPath!, "utf8")).toBe(requestBody);
   });
 });

@@ -321,8 +321,20 @@ export async function startTunnelProxyServer({
     let requestFinalizePromise:
       | Promise<{ bodyPath: string | null; preview: string | null }>
       | null = null;
+    let resolveRequestLifecycle = () => {};
+    const requestLifecycleDone = new Promise<void>((resolve) => {
+      resolveRequestLifecycle = resolve;
+    });
+    let requestLifecycleMarkedDone = false;
     const toErrorMessage = (error: unknown) =>
       error instanceof Error ? error.message : String(error);
+    const markRequestLifecycleDone = () => {
+      if (requestLifecycleMarkedDone) {
+        return;
+      }
+      requestLifecycleMarkedDone = true;
+      resolveRequestLifecycle();
+    };
     const storeBodyCaptureFailure = (error: unknown) => {
       if (!shouldCapture) {
         return;
@@ -350,6 +362,10 @@ export async function startTunnelProxyServer({
       requestBodyPath = result.bodyPath;
       requestBodyPreview = result.preview;
       return result;
+    };
+    const finalizeRequestCaptureAfterRequestLifecycle = async () => {
+      await requestLifecycleDone;
+      return finalizeRequestCapture();
     };
 
     const requestFn = targetUrl.protocol === "https:" ? https.request : http.request;
@@ -419,7 +435,7 @@ export async function startTunnelProxyServer({
 
           let captureFailure = "";
           try {
-            await finalizeRequestCapture();
+            await finalizeRequestCaptureAfterRequestLifecycle();
           } catch (captureError) {
             captureFailure += `; request capture finalize failed: ${toErrorMessage(captureError)}`;
           }
@@ -460,7 +476,7 @@ export async function startTunnelProxyServer({
             return;
           }
           try {
-            await finalizeRequestCapture();
+            await finalizeRequestCaptureAfterRequestLifecycle();
             if (responseCapture) {
               const responseResult = await responseCapture.finalize();
               responseBodyPath = responseResult.bodyPath;
@@ -501,6 +517,7 @@ export async function startTunnelProxyServer({
     );
 
     upstream.on("error", async (error) => {
+      abortRequestForward(error);
       if (!response.headersSent) {
         response.writeHead(504, { "content-type": "text/plain; charset=utf-8" });
         response.end("Upstream request failed.");
@@ -516,7 +533,7 @@ export async function startTunnelProxyServer({
       }
       let requestCaptureFailure = "";
       try {
-        const requestResult = await finalizeRequestCapture();
+        const requestResult = await finalizeRequestCaptureAfterRequestLifecycle();
         requestBodyPath = requestResult.bodyPath;
         requestBodyPreview = requestResult.preview;
       } catch (captureError) {
@@ -606,10 +623,51 @@ export async function startTunnelProxyServer({
       try {
         await finalizeRequestCapture();
       } catch {}
+      markRequestLifecycleDone();
     });
 
     request.on("aborted", () => {
       upstream.destroy();
+      void requestForwardPromise
+        .catch(() => {})
+        .then(async () => {
+          try {
+            await finalizeRequestCapture();
+          } catch {}
+        })
+        .finally(() => {
+          markRequestLifecycleDone();
+        });
+    });
+
+    request.on("error", () => {
+      upstream.destroy();
+      void requestForwardPromise
+        .catch(() => {})
+        .then(async () => {
+          try {
+            await finalizeRequestCapture();
+          } catch {}
+        })
+        .finally(() => {
+          markRequestLifecycleDone();
+        });
+    });
+
+    request.on("close", () => {
+      if (requestLifecycleMarkedDone) {
+        return;
+      }
+      void requestForwardPromise
+        .catch(() => {})
+        .then(async () => {
+          try {
+            await finalizeRequestCapture();
+          } catch {}
+        })
+        .finally(() => {
+          markRequestLifecycleDone();
+        });
     });
   });
 

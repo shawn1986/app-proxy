@@ -1,4 +1,5 @@
-import https from "node:https";
+import http, { type Server as HttpServer } from "node:http";
+import https, { type Server as HttpsServer } from "node:https";
 import { mkdirSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { networkInterfaces } from "node:os";
@@ -465,7 +466,51 @@ export async function startProxyServer({
     port: proxy.httpPort,
     host: resolvedHost,
     close: async () => {
+      const serversToWait = new Set<HttpServer | HttpsServer>();
+      if (proxy.httpServer) {
+        serversToWait.add(proxy.httpServer);
+      }
+      if (proxy.httpsServer) {
+        serversToWait.add(proxy.httpsServer);
+      }
+      for (const sslServer of Object.values(proxy.sslServers)) {
+        if (sslServer.server) {
+          serversToWait.add(sslServer.server);
+        }
+      }
+
+      const closeWaiters = [...serversToWait].map((server) => {
+        if (!server.listening) {
+          return Promise.resolve();
+        }
+
+        return new Promise<void>((resolve, reject) => {
+          const onClose = () => {
+            cleanup();
+            resolve();
+          };
+          const onError = (error: Error) => {
+            cleanup();
+            reject(error);
+          };
+          const cleanup = () => {
+            server.off("close", onClose);
+            server.off("error", onError);
+          };
+
+          server.once("close", onClose);
+          server.once("error", onError);
+        });
+      });
+
       proxy.close();
+      const results = await Promise.allSettled(closeWaiters);
+      const failure = results.find(
+        (result): result is PromiseRejectedResult => result.status === "rejected",
+      );
+      if (failure) {
+        throw failure.reason;
+      }
     },
   };
 }

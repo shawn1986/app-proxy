@@ -1,4 +1,5 @@
 import https from "node:https";
+import net from "node:net";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -166,5 +167,53 @@ describe("HTTPS MITM capture", () => {
     expect(sessions).toHaveLength(1);
     expect(sessions[0]?.errorCode).toBe("PROXY_TO_SERVER_REQUEST_ERROR");
     expect(sessions[0]?.responseStatus).toBeNull();
+  });
+
+  it("waits for the MITM listener to fully close before resolving runtime close", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "proxy-https-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+
+    const db = openDatabase(join(dir, "sessions.db"));
+    cleanups.push(() => {
+      db.close();
+    });
+    const repository = createSessionRepository(db);
+    const bus = createSessionEventBus();
+    const proxy = await startProxyServer({
+      port: 0,
+      httpsMode: "mitm",
+      repository,
+      bus,
+      certificateDir: join(dir, "certs"),
+      bodyDir: join(dir, "bodies"),
+    });
+
+    let closed = false;
+    cleanups.push(async () => {
+      if (!closed) {
+        await proxy.close();
+      }
+    });
+
+    const socket = net.connect(proxy.port, "127.0.0.1");
+    cleanups.push(() => {
+      socket.destroy();
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      socket.once("connect", () => resolve());
+      socket.once("error", reject);
+    });
+
+    const closePromise = proxy.close();
+    const closeSettledEarly = await Promise.race([
+      closePromise.then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 50)),
+    ]);
+    expect(closeSettledEarly).toBe(false);
+
+    socket.end();
+    await closePromise;
+    closed = true;
   });
 });
