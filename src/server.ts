@@ -100,24 +100,63 @@ export async function buildApp(
         return;
       }
 
-      httpsMode = nextMode;
       if (!startProxy) {
+        httpsMode = nextMode;
         return;
       }
 
-      if (proxyRuntime) {
-        await proxyRuntime.close();
-      }
+      const previousMode = httpsMode;
+      const previousRuntime = proxyRuntime;
+      let closedPreviousRuntime = false;
 
-      proxyRuntime = await startProxyServer({
-        port: proxyPort,
-        host: proxyHost,
-        httpsMode,
-        repository,
-        bus,
-        certificateDir: paths.certificateDir,
-        bodyDir: paths.bodyDir,
-      });
+      try {
+        if (previousRuntime) {
+          await previousRuntime.close();
+          closedPreviousRuntime = true;
+          proxyRuntime = null;
+        }
+
+        proxyRuntime = await startProxyServer({
+          port: proxyPort,
+          host: proxyHost,
+          httpsMode: nextMode,
+          repository,
+          bus,
+          certificateDir: paths.certificateDir,
+          bodyDir: paths.bodyDir,
+        });
+
+        httpsMode = nextMode;
+      } catch (error) {
+        if (!closedPreviousRuntime) {
+          proxyRuntime = previousRuntime;
+          throw error;
+        }
+
+        try {
+          proxyRuntime = await startProxyServer({
+            port: proxyPort,
+            host: proxyHost,
+            httpsMode: previousMode,
+            repository,
+            bus,
+            certificateDir: paths.certificateDir,
+            bodyDir: paths.bodyDir,
+          });
+        } catch (rollbackError) {
+          console.error({
+            event: "PROXY_MODE_ROLLBACK_FAILED",
+            targetMode: nextMode,
+            rollbackMode: previousMode,
+            message:
+              rollbackError instanceof Error
+                ? rollbackError.message
+                : String(rollbackError),
+          });
+        }
+
+        throw error;
+      }
     },
   });
 

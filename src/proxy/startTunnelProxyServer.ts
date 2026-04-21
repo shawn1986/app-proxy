@@ -221,6 +221,8 @@ export async function startTunnelProxyServer({
 }: TunnelProxyDeps) {
   const selfHosts = getLocalInterfaceHosts();
   const bodyStore = createBodyStore(bodyDir);
+  const activeSockets = new Set<net.Socket>();
+  const activeTunnelSockets = new Set<net.Socket>();
   let activeProxyHost = host;
   let activeProxyPort = port;
 
@@ -229,6 +231,13 @@ export async function startTunnelProxyServer({
   selfHosts.add("localhost");
   selfHosts.add("0.0.0.0");
   selfHosts.add("::1");
+
+  const trackSocket = (target: Set<net.Socket>, socket: net.Socket) => {
+    target.add(socket);
+    socket.once("close", () => {
+      target.delete(socket);
+    });
+  };
 
   const server = http.createServer((request, response) => {
     const startedAt = Date.now();
@@ -401,6 +410,10 @@ export async function startTunnelProxyServer({
     });
   });
 
+  server.on("connection", (socket) => {
+    trackSocket(activeSockets, socket);
+  });
+
   server.on("connect", (request, clientSocket, head) => {
     const startedAt = Date.now();
     const target = parseTargetHostPort(request.url, 443);
@@ -437,6 +450,7 @@ export async function startTunnelProxyServer({
     const shouldCaptureConnect = !isNoiseConnectHost(target.host);
 
     const upstreamSocket = net.connect(target.port, target.host || "localhost");
+    trackSocket(activeTunnelSockets, upstreamSocket);
     let stored = false;
 
     const storeConnectError = (errorCode: string, errorMessage: string) => {
@@ -514,8 +528,28 @@ export async function startTunnelProxyServer({
     host: resolvedHost,
     port: resolvedPort,
     close: async () => {
+      const forceCloseOpenSockets = () => {
+        for (const socket of activeTunnelSockets) {
+          socket.destroy();
+        }
+        for (const socket of activeSockets) {
+          socket.destroy();
+        }
+      };
+
       await new Promise<void>((resolve, reject) => {
+        for (const socket of activeTunnelSockets) {
+          socket.end();
+        }
+        for (const socket of activeSockets) {
+          socket.end();
+        }
+
+        const forceCloseTimer = setTimeout(forceCloseOpenSockets, 1000);
+        forceCloseTimer.unref?.();
+
         server.close((error) => {
+          clearTimeout(forceCloseTimer);
           if (error) {
             reject(error);
             return;
