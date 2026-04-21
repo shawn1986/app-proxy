@@ -55,6 +55,7 @@ describe("session and setup routes", () => {
     expect(setup.statusCode).toBe(200);
     expect(setup.json()).toMatchObject({
       proxyPort: 118080,
+      httpsMode: "tunnel",
       certificate: {
         exists: false,
       },
@@ -72,6 +73,27 @@ describe("session and setup routes", () => {
     expect(certificate.json()).toEqual({
       message: "CA certificate has not been generated yet",
     });
+  });
+
+  it("switches https mode via setup endpoint", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "proxy-routes-"));
+    dataDirs.push(dataDir);
+
+    const app = await buildApp({ dataDir });
+    apps.push(app);
+
+    const before = await app.inject({ method: "GET", url: "/api/setup" });
+    const switched = await app.inject({
+      method: "POST",
+      url: "/api/setup/https-mode",
+      payload: { mode: "mitm" },
+    });
+    const after = await app.inject({ method: "GET", url: "/api/setup" });
+
+    expect(before.json()).toMatchObject({ httpsMode: "tunnel" });
+    expect(switched.statusCode).toBe(200);
+    expect(switched.json()).toEqual({ httpsMode: "mitm" });
+    expect(after.json()).toMatchObject({ httpsMode: "mitm" });
   });
 
   it("serves the dashboard shell", async () => {

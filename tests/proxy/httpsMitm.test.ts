@@ -1,4 +1,5 @@
 import https from "node:https";
+import net from "node:net";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +10,17 @@ import { openDatabase } from "../../src/storage/db.js";
 import { createSessionRepository } from "../../src/storage/sessionRepository.js";
 import { createSessionEventBus } from "../../src/realtime/sessionEventBus.js";
 import { startProxyServer } from "../../src/proxy/createProxyServer.js";
+
+async function getUnusedPort() {
+  const server = net.createServer();
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Failed to allocate an unused TCP port");
+  }
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return address.port;
+}
 
 describe("HTTPS MITM capture", () => {
   const cleanups: Array<() => Promise<void> | void> = [];
@@ -56,6 +68,7 @@ describe("HTTPS MITM capture", () => {
     const bus = createSessionEventBus();
     const proxy = await startProxyServer({
       port: 0,
+      httpsMode: "mitm",
       repository,
       bus,
       certificateDir: join(dir, "certs"),
@@ -130,6 +143,7 @@ describe("HTTPS MITM capture", () => {
     const bus = createSessionEventBus();
     const proxy = await startProxyServer({
       port: 0,
+      httpsMode: "mitm",
       repository,
       bus,
       certificateDir: join(dir, "certs"),
@@ -164,5 +178,43 @@ describe("HTTPS MITM capture", () => {
     expect(sessions).toHaveLength(1);
     expect(sessions[0]?.errorCode).toBe("PROXY_TO_SERVER_REQUEST_ERROR");
     expect(sessions[0]?.responseStatus).toBeNull();
+  });
+
+  it("releases the MITM listener port before runtime close resolves", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "proxy-https-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const proxyPort = await getUnusedPort();
+
+    const db = openDatabase(join(dir, "sessions.db"));
+    cleanups.push(() => {
+      db.close();
+    });
+    const repository = createSessionRepository(db);
+    const bus = createSessionEventBus();
+    const proxy = await startProxyServer({
+      port: proxyPort,
+      httpsMode: "mitm",
+      repository,
+      bus,
+      certificateDir: join(dir, "certs"),
+      bodyDir: join(dir, "bodies"),
+    });
+
+    let closed = false;
+    cleanups.push(async () => {
+      if (!closed) {
+        await proxy.close();
+      }
+    });
+
+    await proxy.close();
+    closed = true;
+
+    const rebound = net.createServer();
+    cleanups.push(() => new Promise<void>((resolve) => rebound.close(() => resolve())));
+    await new Promise<void>((resolve, reject) => {
+      rebound.once("error", reject);
+      rebound.listen(proxyPort, "127.0.0.1", () => resolve());
+    });
   });
 });

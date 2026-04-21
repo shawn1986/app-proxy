@@ -1,4 +1,5 @@
 import http from "node:http";
+import net from "node:net";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +9,7 @@ import { openDatabase } from "../../src/storage/db.js";
 import { createSessionRepository } from "../../src/storage/sessionRepository.js";
 import { createSessionEventBus } from "../../src/realtime/sessionEventBus.js";
 import { startProxyServer } from "../../src/proxy/createProxyServer.js";
+import { isNoiseConnectHost } from "../../src/proxy/startTunnelProxyServer.js";
 
 const RESPONSE_PREVIEW_LIMIT = 4096;
 
@@ -17,6 +19,22 @@ async function getUnusedPort() {
   const port = (server.address() as { port: number }).port;
   await new Promise<void>((resolve) => server.close(() => resolve()));
   return port;
+}
+
+async function waitForSession(
+  repository: ReturnType<typeof createSessionRepository>,
+  timeoutMs = 3000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const session = repository.listSessions()[0];
+    if (session) {
+      return session;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
+
+  throw new Error("Timed out waiting for captured session");
 }
 
 describe("HTTP proxy capture", () => {
@@ -115,6 +133,187 @@ describe("HTTP proxy capture", () => {
     expect(sessions[0]?.errorCode).toBe("PROXY_TO_SERVER_REQUEST_ERROR");
     expect(sessions[0]?.errorMessage).toContain("ECONNREFUSED");
     expect(sessions[0]?.responseStatus).toBeNull();
+  });
+
+  it("returns 400 for malformed absolute target URLs", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "proxy-http-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+
+    const db = openDatabase(join(dir, "sessions.db"));
+    cleanups.push(() => {
+      db.close();
+    });
+    const repository = createSessionRepository(db);
+    const bus = createSessionEventBus();
+    const proxy = await startProxyServer({
+      port: 0,
+      httpsMode: "tunnel",
+      repository,
+      bus,
+      certificateDir: join(dir, "certs"),
+      bodyDir: join(dir, "bodies"),
+    });
+    cleanups.push(() => proxy.close());
+
+    const socket = net.connect(proxy.port, "127.0.0.1");
+    cleanups.push(() => {
+      socket.destroy();
+    });
+    await new Promise<void>((resolve, reject) => {
+      socket.once("connect", () => resolve());
+      socket.once("error", reject);
+    });
+
+    const responseChunks: Buffer[] = [];
+    const closed = new Promise<void>((resolve, reject) => {
+      socket.on("data", (chunk) => {
+        responseChunks.push(Buffer.from(chunk));
+      });
+      socket.once("close", () => resolve());
+      socket.once("error", reject);
+    });
+
+    socket.write(
+      "GET http:// HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n",
+    );
+    await Promise.race([
+      closed,
+      new Promise<void>((_, reject) =>
+        setTimeout(() => reject(new Error("Timed out waiting for proxy response")), 2000),
+      ),
+    ]);
+
+    const rawResponse = Buffer.concat(responseChunks).toString("utf8");
+    expect(rawResponse).toContain("HTTP/1.1 400");
+    expect(rawResponse).toContain("Invalid request target URL.");
+    expect(repository.listSessions()).toHaveLength(0);
+  });
+
+  it("returns 400 for unsupported absolute URI schemes", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "proxy-http-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+
+    const db = openDatabase(join(dir, "sessions.db"));
+    cleanups.push(() => {
+      db.close();
+    });
+    const repository = createSessionRepository(db);
+    const bus = createSessionEventBus();
+    const proxy = await startProxyServer({
+      port: 0,
+      httpsMode: "tunnel",
+      repository,
+      bus,
+      certificateDir: join(dir, "certs"),
+      bodyDir: join(dir, "bodies"),
+    });
+    cleanups.push(() => proxy.close());
+
+    const socket = net.connect(proxy.port, "127.0.0.1");
+    cleanups.push(() => {
+      socket.destroy();
+    });
+    await new Promise<void>((resolve, reject) => {
+      socket.once("connect", () => resolve());
+      socket.once("error", reject);
+    });
+
+    const responseChunks: Buffer[] = [];
+    const closed = new Promise<void>((resolve, reject) => {
+      socket.on("data", (chunk) => {
+        responseChunks.push(Buffer.from(chunk));
+      });
+      socket.once("close", () => resolve());
+      socket.once("error", reject);
+    });
+
+    socket.write(
+      "GET ftp://example.test/path HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n",
+    );
+    await Promise.race([
+      closed,
+      new Promise<void>((_, reject) =>
+        setTimeout(() => reject(new Error("Timed out waiting for proxy response")), 2000),
+      ),
+    ]);
+
+    const rawResponse = Buffer.concat(responseChunks).toString("utf8");
+    expect(rawResponse).toContain("HTTP/1.1 400");
+    expect(rawResponse).toContain("Unsupported request target protocol.");
+    expect(repository.listSessions()).toHaveLength(0);
+  });
+
+  it("returns a 504 response instead of resetting the client socket on upload failure", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "proxy-http-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+
+    const db = openDatabase(join(dir, "sessions.db"));
+    cleanups.push(() => {
+      db.close();
+    });
+    const repository = createSessionRepository(db);
+    const bus = createSessionEventBus();
+    const proxy = await startProxyServer({
+      port: 0,
+      repository,
+      bus,
+      certificateDir: join(dir, "certs"),
+      bodyDir: join(dir, "bodies"),
+    });
+    cleanups.push(() => proxy.close());
+
+    const upstreamPort = await getUnusedPort();
+    const socket = net.connect(proxy.port, "127.0.0.1");
+    cleanups.push(() => {
+      socket.destroy();
+    });
+    await new Promise<void>((resolve, reject) => {
+      socket.once("connect", () => resolve());
+      socket.once("error", reject);
+    });
+
+    const responseChunks: Buffer[] = [];
+    let sawSocketError = false;
+    const closed = new Promise<void>((resolve) => {
+      socket.on("data", (chunk) => {
+        responseChunks.push(Buffer.from(chunk));
+      });
+      socket.once("error", () => {
+        sawSocketError = true;
+        resolve();
+      });
+      socket.once("close", () => resolve());
+    });
+
+    const chunk = "x".repeat(16 * 1024);
+    const chunkCount = 32;
+    const contentLength = chunk.length * chunkCount;
+    socket.write(
+      `POST http://127.0.0.1:${upstreamPort}/upload-fail HTTP/1.1\r\nHost: 127.0.0.1:${upstreamPort}\r\nContent-Type: application/octet-stream\r\nContent-Length: ${contentLength}\r\nConnection: close\r\n\r\n`,
+    );
+
+    for (let index = 0; index < chunkCount; index += 1) {
+      if (socket.destroyed) {
+        break;
+      }
+      socket.write(chunk);
+    }
+
+    await Promise.race([
+      closed,
+      new Promise<void>((_, reject) =>
+        setTimeout(() => reject(new Error("Timed out waiting for proxy response")), 2000),
+      ),
+    ]);
+
+    const rawResponse = Buffer.concat(responseChunks).toString("utf8");
+    expect(sawSocketError).toBe(false);
+    expect(rawResponse).toContain("HTTP/1.1 504");
+    expect(rawResponse).toContain("PROXY_TO_SERVER_REQUEST_ERROR");
+
+    const session = await waitForSession(repository);
+    expect(session.path).toBe("/upload-fail");
+    expect(session.errorCode).toBe("PROXY_TO_SERVER_REQUEST_ERROR");
   });
 
   it("does not let subscriber failures break proxy traffic", async () => {
@@ -287,5 +486,96 @@ describe("HTTP proxy capture", () => {
         proxyPort: proxy.port,
       }),
     );
+  });
+
+  it("waits for request completion before finalizing tunnel request capture", async () => {
+    const upstream = http.createServer((request, res) => {
+      request.once("data", () => {
+        res.writeHead(413, { "content-type": "text/plain; charset=utf-8" });
+        res.end("too large");
+      });
+      request.resume();
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, resolve));
+    cleanups.push(() => new Promise<void>((resolve) => upstream.close(() => resolve())));
+
+    const dir = mkdtempSync(join(tmpdir(), "proxy-http-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+
+    const db = openDatabase(join(dir, "sessions.db"));
+    cleanups.push(() => {
+      db.close();
+    });
+    const repository = createSessionRepository(db);
+    const bus = createSessionEventBus();
+    const proxy = await startProxyServer({
+      port: 0,
+      repository,
+      bus,
+      certificateDir: join(dir, "certs"),
+      bodyDir: join(dir, "bodies"),
+    });
+    cleanups.push(() => proxy.close());
+
+    const upstreamPort = (upstream.address() as { port: number }).port;
+    const requestBody = "a".repeat(2048) + "b".repeat(2048);
+    const firstChunk = requestBody.slice(0, 1024);
+    const remainingChunk = requestBody.slice(1024);
+
+    const socket = net.connect(proxy.port, "127.0.0.1");
+    cleanups.push(() => {
+      socket.destroy();
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      socket.once("connect", () => resolve());
+      socket.once("error", reject);
+    });
+
+    const responseChunks: Buffer[] = [];
+    let resolveFirstResponse: (() => void) | null = null;
+    const firstResponsePromise = new Promise<void>((resolve) => {
+      resolveFirstResponse = resolve;
+    });
+    const responseDonePromise = new Promise<void>((resolve, reject) => {
+      socket.on("data", (chunk) => {
+        responseChunks.push(Buffer.from(chunk));
+        if (resolveFirstResponse) {
+          resolveFirstResponse();
+          resolveFirstResponse = null;
+        }
+      });
+      socket.once("end", () => resolve());
+      socket.once("error", reject);
+    });
+
+    socket.write(
+      `POST http://127.0.0.1:${upstreamPort}/early-response HTTP/1.1\r\nHost: 127.0.0.1:${upstreamPort}\r\nContent-Type: text/plain\r\nContent-Length: ${requestBody.length}\r\nConnection: keep-alive\r\n\r\n`,
+    );
+    socket.write(firstChunk);
+
+    const sawEarlyResponse = await Promise.race([
+      firstResponsePromise.then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 1000)),
+    ]);
+    expect(sawEarlyResponse).toBe(true);
+
+    socket.write(remainingChunk);
+    socket.end();
+    await responseDonePromise;
+
+    const rawResponse = Buffer.concat(responseChunks).toString("utf8");
+    expect(rawResponse).toContain("413");
+
+    const session = await waitForSession(repository);
+    expect(session.path).toBe("/early-response");
+    expect(session.responseStatus).toBe(413);
+  });
+
+  it("filters only dedicated probe hosts for CONNECT noise suppression", () => {
+    expect(isNoiseConnectHost("connectivitycheck.gstatic.com")).toBe(true);
+    expect(isNoiseConnectHost("detectportal.firefox.com")).toBe(true);
+    expect(isNoiseConnectHost("play.googleapis.com")).toBe(false);
+    expect(isNoiseConnectHost("clients3.google.com")).toBe(false);
   });
 });

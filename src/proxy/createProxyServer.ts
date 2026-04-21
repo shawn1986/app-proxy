@@ -1,4 +1,5 @@
-import https from "node:https";
+import http, { type Server as HttpServer } from "node:http";
+import https, { type Server as HttpsServer } from "node:https";
 import { mkdirSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { networkInterfaces } from "node:os";
@@ -20,6 +21,7 @@ import { createBodyStore } from "../storage/bodyStore.js";
 import type { createSessionRepository } from "../storage/sessionRepository.js";
 import type { NewSessionRecord } from "../sessions/types.js";
 import { createPendingSession, finalizePendingSession } from "./sessionCollector.js";
+import { startTunnelProxyServer } from "./startTunnelProxyServer.js";
 
 const BODY_PREVIEW_LIMIT = 4096;
 
@@ -201,12 +203,15 @@ function storeSession(
 type ProxyDeps = {
   port: number;
   host?: string;
+  httpsMode?: HttpsMode;
   repository: ReturnType<typeof createSessionRepository>;
   bus: ReturnType<typeof createSessionEventBus>;
   certificateDir: string;
   bodyDir: string;
   upstreamCaCertificates?: string[];
 };
+
+export type HttpsMode = "mitm" | "tunnel";
 
 type ActiveSession = {
   pending: NewSessionRecord;
@@ -223,12 +228,23 @@ type ActiveSession = {
 export async function startProxyServer({
   port,
   host = "127.0.0.1",
+  httpsMode = "mitm",
   repository,
   bus,
   certificateDir,
   bodyDir,
   upstreamCaCertificates,
 }: ProxyDeps) {
+  if (httpsMode === "tunnel") {
+    return startTunnelProxyServer({
+      port,
+      host,
+      repository,
+      bus,
+      bodyDir,
+    });
+  }
+
   const caStore = resolveCaStorePaths(certificateDir);
   mkdirSync(caStore.certificateDir, { recursive: true });
   mkdirSync(bodyDir, { recursive: true });
@@ -450,7 +466,57 @@ export async function startProxyServer({
     port: proxy.httpPort,
     host: resolvedHost,
     close: async () => {
+      const hasActiveListeners =
+        !!proxy.httpServer || !!proxy.httpsServer || Object.keys(proxy.sslServers).length > 0;
+      if (!hasActiveListeners) {
+        return;
+      }
+
+      const serversToWait = new Set<HttpServer | HttpsServer>();
+      if (proxy.httpServer) {
+        serversToWait.add(proxy.httpServer);
+      }
+      if (proxy.httpsServer) {
+        serversToWait.add(proxy.httpsServer);
+      }
+      for (const sslServer of Object.values(proxy.sslServers)) {
+        if (sslServer.server) {
+          serversToWait.add(sslServer.server);
+        }
+      }
+
+      const closeWaiters = [...serversToWait].map((server) => {
+        if (!server.listening) {
+          return Promise.resolve();
+        }
+
+        return new Promise<void>((resolve, reject) => {
+          const onClose = () => {
+            cleanup();
+            resolve();
+          };
+          const onError = (error: Error) => {
+            cleanup();
+            reject(error);
+          };
+          const cleanup = () => {
+            server.off("close", onClose);
+            server.off("error", onError);
+          };
+
+          server.once("close", onClose);
+          server.once("error", onError);
+        });
+      });
+
       proxy.close();
+      const results = await Promise.allSettled(closeWaiters);
+      const failure = results.find(
+        (result): result is PromiseRejectedResult => result.status === "rejected",
+      );
+      if (failure) {
+        throw failure.reason;
+      }
     },
   };
 }

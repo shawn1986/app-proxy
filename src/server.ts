@@ -6,7 +6,7 @@ import { appConfig, resolveAppPaths } from "./config.js";
 import { registerHealthRoutes } from "./http/routes/healthRoutes.js";
 import { registerSessionRoutes } from "./http/routes/sessionRoutes.js";
 import { registerSetupRoutes } from "./http/routes/setupRoutes.js";
-import { startProxyServer } from "./proxy/createProxyServer.js";
+import { startProxyServer, type HttpsMode } from "./proxy/createProxyServer.js";
 import { createSessionEventBus } from "./realtime/sessionEventBus.js";
 import { openDatabase } from "./storage/db.js";
 import { createSessionRepository } from "./storage/sessionRepository.js";
@@ -17,12 +17,14 @@ export async function buildApp(
     dataDir: string;
     proxyPort: number;
     proxyHost: string;
+    httpsMode: HttpsMode;
     startProxy: boolean;
   }> = {},
 ) {
   const paths = resolveAppPaths(overrides.dataDir ?? appConfig.dataDir);
   const proxyPort = overrides.proxyPort ?? appConfig.proxyPort;
   const proxyHost = overrides.proxyHost ?? appConfig.proxyHost;
+  let httpsMode = overrides.httpsMode ?? appConfig.httpsMode;
   const startProxy = overrides.startProxy ?? false;
   const moduleDir = resolve(fileURLToPath(new URL(".", import.meta.url)));
   const publicDir = join(moduleDir, "..", "public");
@@ -34,6 +36,7 @@ export async function buildApp(
   let proxyRuntime:
     | Awaited<ReturnType<typeof startProxyServer>>
     | null = null;
+  let httpsModeSwitchQueue: Promise<void> = Promise.resolve();
 
   app.addHook("onClose", async () => {
     if (proxyRuntime) {
@@ -89,12 +92,86 @@ export async function buildApp(
 
   await registerHealthRoutes(app);
   await registerSessionRoutes(app, repository);
-  await registerSetupRoutes(app, { proxyPort, certificateDir: paths.certificateDir });
+  const applyHttpsMode = async (nextMode: HttpsMode) => {
+    if (nextMode === httpsMode) {
+      return;
+    }
+
+    if (!startProxy) {
+      httpsMode = nextMode;
+      return;
+    }
+
+    const previousMode = httpsMode;
+    const previousRuntime = proxyRuntime;
+    let closedPreviousRuntime = false;
+
+    try {
+      if (previousRuntime) {
+        await previousRuntime.close();
+        closedPreviousRuntime = true;
+        proxyRuntime = null;
+      }
+
+      proxyRuntime = await startProxyServer({
+        port: proxyPort,
+        host: proxyHost,
+        httpsMode: nextMode,
+        repository,
+        bus,
+        certificateDir: paths.certificateDir,
+        bodyDir: paths.bodyDir,
+      });
+
+      httpsMode = nextMode;
+    } catch (error) {
+      if (!closedPreviousRuntime) {
+        proxyRuntime = previousRuntime;
+        throw error;
+      }
+
+      try {
+        proxyRuntime = await startProxyServer({
+          port: proxyPort,
+          host: proxyHost,
+          httpsMode: previousMode,
+          repository,
+          bus,
+          certificateDir: paths.certificateDir,
+          bodyDir: paths.bodyDir,
+        });
+      } catch (rollbackError) {
+        console.error({
+          event: "PROXY_MODE_ROLLBACK_FAILED",
+          targetMode: nextMode,
+          rollbackMode: previousMode,
+          message:
+            rollbackError instanceof Error
+              ? rollbackError.message
+              : String(rollbackError),
+        });
+      }
+
+      throw error;
+    }
+  };
+
+  await registerSetupRoutes(app, {
+    proxyPort,
+    certificateDir: paths.certificateDir,
+    getHttpsMode: () => httpsMode,
+    setHttpsMode: async (nextMode) => {
+      const operation = httpsModeSwitchQueue.then(() => applyHttpsMode(nextMode));
+      httpsModeSwitchQueue = operation.catch(() => {});
+      await operation;
+    },
+  });
 
   if (startProxy) {
     proxyRuntime = await startProxyServer({
       port: proxyPort,
       host: proxyHost,
+      httpsMode,
       repository,
       bus,
       certificateDir: paths.certificateDir,

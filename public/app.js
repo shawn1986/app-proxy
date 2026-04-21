@@ -4,6 +4,7 @@ const state = {
   filter: "",
   flashId: null,
   flashTimerId: null,
+  httpsMode: "tunnel",
 };
 
 class AppRequestError extends Error {
@@ -28,18 +29,6 @@ const elements = {
   template: document.querySelector("#session-item-template"),
 };
 
-function mergeSessions(existingSessions, incomingSessions) {
-  const sessionsById = new Map();
-
-  for (const session of [...existingSessions, ...incomingSessions]) {
-    sessionsById.set(session.id, session);
-  }
-
-  return Array.from(sessionsById.values()).sort((left, right) => {
-    return Date.parse(right.startedAt) - Date.parse(left.startedAt);
-  });
-}
-
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (char) => {
     switch (char) {
@@ -59,22 +48,64 @@ function escapeHtml(value) {
   });
 }
 
+function mergeSessions(existingSessions, incomingSessions) {
+  const sessionsById = new Map();
+  for (const session of [...existingSessions, ...incomingSessions]) {
+    sessionsById.set(session.id, session);
+  }
+  return Array.from(sessionsById.values()).sort((left, right) => {
+    return Date.parse(right.startedAt) - Date.parse(left.startedAt);
+  });
+}
+
+function updateChip(element, text, status, title = "") {
+  if (!element) {
+    return;
+  }
+  element.textContent = text;
+  element.dataset.state = status;
+  element.title = title;
+}
+
+function setLiveStatus(label, status) {
+  updateChip(elements.liveStatus, `LIVE ${label}`, status);
+}
+
+function getHttpsModeLabel(mode) {
+  return mode === "mitm" ? "HTTPS MITM (decrypt)" : "HTTPS Tunnel (no decrypt)";
+}
+
+function updateSessionCount(visibleCount, totalCount) {
+  const countText =
+    visibleCount === totalCount ? `${visibleCount} sessions` : `${visibleCount}/${totalCount} sessions`;
+
+  if (elements.count) {
+    elements.count.textContent = countText;
+  }
+  if (elements.sessionCountChip) {
+    elements.sessionCountChip.dataset.state = totalCount === 0 ? "idle" : "active";
+    elements.sessionCountChip.title = `Visible ${countText}`;
+  }
+}
+
+function setSessionCountChipState(status, title = "") {
+  if (!elements.sessionCountChip) {
+    return;
+  }
+  elements.sessionCountChip.dataset.state = status;
+  elements.sessionCountChip.title = title;
+}
+
 function getErrorMessage(error, fallback) {
   if (error instanceof AppRequestError) {
     if (error.kind === "network") {
-      return "網路連線失敗，請確認服務狀態後重試。";
+      return "Network request failed";
     }
     if (error.kind === "parse") {
-      return "伺服器回傳資料格式異常。";
+      return "Failed to parse server response";
     }
     if (error.kind === "http") {
-      if (error.status === 404) {
-        return "找不到指定資源（HTTP 404）。";
-      }
-      if (error.status !== null && error.status >= 500) {
-        return `伺服器暫時無法回應（HTTP ${error.status}）。`;
-      }
-      return `請求失敗（HTTP ${error.status ?? "未知"}）。`;
+      return `HTTP ${error.status ?? "unknown"}`;
     }
   }
   return fallback;
@@ -102,7 +133,7 @@ async function getJson(url) {
 function formatHeaders(headers) {
   const entries = Object.entries(headers ?? {});
   if (entries.length === 0) {
-    return "<p class=\"placeholder\">未擷取到任何標頭。</p>";
+    return '<p class="placeholder">No headers</p>';
   }
 
   return `<dl class="kv-list">${entries
@@ -115,61 +146,18 @@ function formatHeaders(headers) {
 
 function formatPreview(label, preview) {
   if (!preview) {
-    return `<section><h4>${label}</h4><p class="placeholder">目前沒有可用內容預覽。</p></section>`;
+    return `<section><h4>${label}</h4><p class="placeholder">No preview</p></section>`;
   }
-
   return `<section><h4>${label}</h4><pre>${escapeHtml(preview)}</pre></section>`;
-}
-
-function updateChip(element, text, status, title = "") {
-  if (!element) {
-    return;
-  }
-  element.textContent = text;
-  element.dataset.state = status;
-  element.title = title;
-}
-
-function setLiveStatus(label, status) {
-  updateChip(elements.liveStatus, `即時連線：${label}`, status);
-}
-
-function updateSessionCount(visibleCount, totalCount) {
-  const countText =
-    visibleCount === totalCount
-      ? `${visibleCount} 筆`
-      : `${visibleCount}/${totalCount} 筆`;
-
-  if (elements.count) {
-    elements.count.textContent = countText;
-  }
-
-  if (elements.sessionCountChip) {
-    elements.sessionCountChip.dataset.state =
-      totalCount === 0 ? "idle" : "active";
-    elements.sessionCountChip.title = `目前顯示 ${countText} 流量事件`;
-  }
-}
-
-function setSessionCountChipState(status, title = "") {
-  if (!elements.sessionCountChip) {
-    return;
-  }
-  elements.sessionCountChip.dataset.state = status;
-  elements.sessionCountChip.title = title;
 }
 
 function renderList() {
   const filter = state.filter.trim().toLowerCase();
   const visibleSessions = state.sessions.filter((session) => {
-    if (!filter) return true;
-
-    const haystack = [
-      session.method,
-      session.host,
-      session.path,
-      String(session.responseStatus ?? ""),
-    ]
+    if (!filter) {
+      return true;
+    }
+    const haystack = [session.method, session.host, session.path, String(session.responseStatus ?? "")]
       .join(" ")
       .toLowerCase();
     return haystack.includes(filter);
@@ -180,8 +168,8 @@ function renderList() {
 
   if (visibleSessions.length === 0) {
     elements.list.innerHTML = filter
-      ? "<p class=\"placeholder\">查無符合篩選條件的流量事件。</p>"
-      : "<p class=\"placeholder\">尚未收到任何流量事件。</p>";
+      ? '<p class="placeholder">No matching sessions</p>'
+      : '<p class="placeholder">No captured sessions yet</p>';
     return;
   }
 
@@ -196,7 +184,7 @@ function renderList() {
     }
     item.querySelector(".method").textContent = session.method;
     item.querySelector(".target").textContent = `${session.host}${session.path}`;
-    item.querySelector(".meta").textContent = `${session.scheme.toUpperCase()} ${session.responseStatus ?? "待回應"} ${new Date(session.startedAt).toLocaleString("zh-TW")}`;
+    item.querySelector(".meta").textContent = `${session.scheme.toUpperCase()} ${session.responseStatus ?? "PENDING"} ${new Date(session.startedAt).toLocaleString("zh-TW")}`;
     item.addEventListener("click", () => {
       void loadSessionDetail(session.id);
     });
@@ -206,8 +194,7 @@ function renderList() {
 
 function renderDetail(session) {
   if (!session) {
-    elements.detail.innerHTML =
-      "<p class=\"placeholder\">請先選擇一筆事件以檢視封包剖析。</p>";
+    elements.detail.innerHTML = '<p class="placeholder">Select a session to inspect details</p>';
     return;
   }
 
@@ -216,74 +203,126 @@ function renderDetail(session) {
       <h3>${escapeHtml(session.method)} ${escapeHtml(session.host)}${escapeHtml(session.path)}</h3>
       <p class="summary">
         ${escapeHtml(session.scheme.toUpperCase())} |
-        狀態 ${escapeHtml(session.responseStatus ?? "待回應")} |
-        耗時 ${escapeHtml(session.durationMs ?? "N/A")} ms
+        Status ${escapeHtml(session.responseStatus ?? "PENDING")} |
+        Duration ${escapeHtml(session.durationMs ?? "N/A")} ms
       </p>
     </section>
     <section>
-      <h4>請求標頭</h4>
+      <h4>Request Headers</h4>
       ${formatHeaders(session.requestHeaders)}
     </section>
-    ${formatPreview("請求本文預覽", session.requestBodyPreview)}
+    ${formatPreview("Request Body Preview", session.requestBodyPreview)}
     <section>
-      <h4>回應標頭</h4>
+      <h4>Response Headers</h4>
       ${formatHeaders(session.responseHeaders)}
     </section>
-    ${formatPreview("回應本文預覽", session.responseBodyPreview)}
+    ${formatPreview("Response Body Preview", session.responseBodyPreview)}
   `;
 }
 
+async function switchHttpsMode(mode) {
+  try {
+    const response = await fetch("/api/setup/https-mode", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ mode }),
+    });
+    if (!response.ok) {
+      throw new AppRequestError("http", response.status);
+    }
+    await loadSetup();
+    setLiveStatus("mode switched", "online");
+    const errorNode = elements.setup.querySelector("#https-mode-error");
+    if (errorNode) {
+      errorNode.textContent = "";
+    }
+  } catch (error) {
+    const message = getErrorMessage(error, "failed to switch HTTPS mode");
+    setLiveStatus("switch failed", "warning");
+    const errorNode = elements.setup.querySelector("#https-mode-error");
+    if (errorNode) {
+      errorNode.textContent = `HTTPS mode switch failed: ${message}`;
+      return;
+    }
+    const fallback = document.createElement("p");
+    fallback.className = "placeholder";
+    fallback.textContent = `HTTPS mode switch failed: ${message}`;
+    elements.setup.append(fallback);
+  }
+}
+
 function renderSetup(setup) {
+  state.httpsMode = setup.httpsMode === "mitm" ? "mitm" : "tunnel";
   const certificateText = setup.certificate.exists
-    ? "憑證已建立，可下載安裝。"
-    : "尚未建立 CA 憑證，請先完成初始化。";
+    ? "CA certificate ready"
+    : "CA certificate not generated yet";
+  const nextMode = state.httpsMode === "mitm" ? "tunnel" : "mitm";
 
   updateChip(
     elements.proxyPortChip,
-    `代理埠：${setup.proxyPort}`,
+    `Proxy ${setup.proxyPort}`,
     "online",
-    `目前代理監聽埠為 ${setup.proxyPort}`,
+    `Proxy listening port ${setup.proxyPort}`,
   );
   updateChip(
     elements.certificateStatus,
-    setup.certificate.exists ? "憑證：已就緒" : "憑證：尚未建立",
+    setup.certificate.exists ? "CA ready" : "CA missing",
     setup.certificate.exists ? "online" : "warning",
     setup.certificate.exists && setup.certificate.caPath
-      ? `憑證路徑：${setup.certificate.caPath}`
+      ? `CA path: ${setup.certificate.caPath}`
       : "",
   );
 
   elements.setup.innerHTML = `
     <section>
-      <h3>代理埠</h3>
+      <h3>Proxy Port</h3>
       <p>${escapeHtml(setup.proxyPort)}</p>
     </section>
     <section>
-      <h3>憑證狀態</h3>
+      <h3>Certificate</h3>
       <p>${escapeHtml(certificateText)}</p>
-      <p><a href="/api/certificate">下載 CA 憑證</a></p>
+      <p><a href="/api/certificate">Download CA certificate</a></p>
     </section>
     <section>
-      <h3>Android 設定步驟</h3>
+      <h3>HTTPS Mode</h3>
+      <p>Current: ${escapeHtml(getHttpsModeLabel(state.httpsMode))}</p>
+      <button id="https-mode-toggle" class="mode-toggle" type="button" data-next-mode="${nextMode}">
+        Switch to ${escapeHtml(getHttpsModeLabel(nextMode))}
+      </button>
+      <p id="https-mode-error" class="placeholder"></p>
+    </section>
+    <section>
+      <h3>Android Steps</h3>
       <ol class="steps">
         ${setup.androidSteps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}
       </ol>
     </section>
   `;
+
+  const toggle = elements.setup.querySelector("#https-mode-toggle");
+  if (toggle) {
+    toggle.addEventListener("click", () => {
+      const mode = toggle.dataset.nextMode;
+      if (mode === "mitm" || mode === "tunnel") {
+        void switchHttpsMode(mode);
+      }
+    });
+  }
 }
 
 async function loadSessionDetail(id) {
   state.selectedId = id;
   renderList();
-  elements.detail.innerHTML =
-    "<p class=\"placeholder\">正在載入封包剖析資料。</p>";
+  elements.detail.innerHTML = '<p class="placeholder">Loading session detail...</p>';
 
   try {
     const session = await getJson(`/api/sessions/${id}`);
     renderDetail(session);
   } catch (error) {
-    const message = getErrorMessage(error, "讀取封包剖析失敗。");
-    elements.detail.innerHTML = `<p class="placeholder">${escapeHtml(`讀取封包剖析失敗：${message}`)}</p>`;
+    const message = getErrorMessage(error, "failed to load session detail");
+    elements.detail.innerHTML = `<p class="placeholder">${escapeHtml(`Failed to load session detail: ${message}`)}</p>`;
   }
 }
 
@@ -292,10 +331,10 @@ async function loadSetup() {
     const setup = await getJson("/api/setup");
     renderSetup(setup);
   } catch (error) {
-    updateChip(elements.proxyPortChip, "代理埠：讀取失敗", "error");
-    updateChip(elements.certificateStatus, "憑證：讀取失敗", "error");
-    const message = getErrorMessage(error, "讀取節點診斷失敗。");
-    elements.setup.innerHTML = `<p class="placeholder">${escapeHtml(`讀取節點診斷失敗：${message}`)}</p>`;
+    updateChip(elements.proxyPortChip, "Proxy load failed", "error");
+    updateChip(elements.certificateStatus, "CA load failed", "error");
+    const message = getErrorMessage(error, "failed to load setup");
+    elements.setup.innerHTML = `<p class="placeholder">${escapeHtml(`Failed to load setup: ${message}`)}</p>`;
   }
 }
 
@@ -307,8 +346,8 @@ async function loadSessions() {
     setSessionCountChipState(
       state.sessions.length === 0 ? "idle" : "active",
       state.sessions.length === 0
-        ? "目前尚未收到流量事件"
-        : `目前共 ${state.sessions.length} 筆流量事件`,
+        ? "No sessions captured"
+        : `Total ${state.sessions.length} sessions`,
     );
     if (!state.selectedId && state.sessions.length > 0) {
       await loadSessionDetail(state.sessions[0].id);
@@ -317,9 +356,9 @@ async function loadSessions() {
     }
     return true;
   } catch (error) {
-    const message = getErrorMessage(error, "讀取流量事件失敗。");
-    elements.list.innerHTML = `<p class="placeholder">${escapeHtml(`讀取流量事件失敗：${message}`)}</p>`;
-    setSessionCountChipState("error", `流量事件同步失敗：${message}`);
+    const message = getErrorMessage(error, "failed to load sessions");
+    elements.list.innerHTML = `<p class="placeholder">${escapeHtml(`Failed to load sessions: ${message}`)}</p>`;
+    setSessionCountChipState("error", `Session load failed: ${message}`);
     return false;
   }
 }
@@ -358,10 +397,10 @@ function subscribeToEvents() {
       return syncInFlight;
     }
 
-    setLiveStatus("同步中", "syncing");
+    setLiveStatus("syncing", "syncing");
     syncInFlight = (async () => {
       const ok = await loadSessions();
-      setLiveStatus(ok ? "已連線" : "同步失敗", ok ? "online" : "warning");
+      setLiveStatus(ok ? "online" : "warning", ok ? "online" : "warning");
     })();
 
     try {
@@ -371,24 +410,25 @@ function subscribeToEvents() {
     }
   }
 
-  setLiveStatus("連線中", "syncing");
+  setLiveStatus("connecting", "syncing");
 
   eventSource.addEventListener("open", () => {
     void resyncSessions();
   });
 
   eventSource.addEventListener("session", (event) => {
-    setLiveStatus("已連線", "online");
+    setLiveStatus("online", "online");
     const session = JSON.parse(event.data);
     prependSession(session);
   });
+
   eventSource.onerror = () => {
-    setLiveStatus("重連中", "warning");
+    setLiveStatus("disconnected", "warning");
   };
 }
 
 updateSessionCount(0, 0);
-setLiveStatus("同步中", "syncing");
+setLiveStatus("connecting", "syncing");
 
 if (elements.filter) {
   elements.filter.addEventListener("input", (event) => {
