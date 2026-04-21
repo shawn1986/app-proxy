@@ -439,12 +439,36 @@ export async function startTunnelProxyServer({
       });
     });
 
+    let waitingForUpstreamDrain = false;
+    const onUpstreamDrain = () => {
+      waitingForUpstreamDrain = false;
+      request.resume();
+    };
+    const clearUpstreamDrainWait = () => {
+      if (!waitingForUpstreamDrain) {
+        return;
+      }
+      waitingForUpstreamDrain = false;
+      upstream.off("drain", onUpstreamDrain);
+    };
+
+    request.once("close", clearUpstreamDrainWait);
+    upstream.once("close", clearUpstreamDrainWait);
+
     request.on("data", (chunk) => {
       const buffer = Buffer.from(chunk);
       if (requestCapture) {
         void requestCapture.write(buffer).catch(() => {});
       }
-      upstream.write(buffer);
+      if (upstream.write(buffer)) {
+        return;
+      }
+
+      if (!waitingForUpstreamDrain) {
+        waitingForUpstreamDrain = true;
+        request.pause();
+        upstream.once("drain", onUpstreamDrain);
+      }
     });
 
     request.on("end", async () => {
