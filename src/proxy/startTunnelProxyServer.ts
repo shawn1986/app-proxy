@@ -391,8 +391,10 @@ export async function startTunnelProxyServer({
     upstream.on("error", async (error) => {
       if (!response.headersSent) {
         response.writeHead(504, { "content-type": "text/plain; charset=utf-8" });
+        response.end("Upstream request failed.");
+      } else {
+        response.destroy();
       }
-      response.end("Upstream request failed.");
       if (stored) {
         return;
       }
@@ -480,6 +482,7 @@ export async function startTunnelProxyServer({
     const upstreamSocket = net.connect(target.port, target.host || "localhost");
     trackSocket(activeTunnelSockets, upstreamSocket);
     let stored = false;
+    let tunnelEstablished = false;
 
     const storeConnectError = (errorCode: string, errorMessage: string) => {
       if (stored) {
@@ -498,6 +501,7 @@ export async function startTunnelProxyServer({
     };
 
     upstreamSocket.on("connect", () => {
+      tunnelEstablished = true;
       clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
       if (head.length > 0) {
         upstreamSocket.write(head);
@@ -519,10 +523,14 @@ export async function startTunnelProxyServer({
     });
 
     upstreamSocket.on("error", (error) => {
-      clientSocket.write(
-        "HTTP/1.1 504 Gateway Timeout\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\nUpstream connect failed.",
-      );
-      clientSocket.end();
+      if (tunnelEstablished) {
+        clientSocket.destroy();
+      } else if (!clientSocket.destroyed) {
+        clientSocket.write(
+          "HTTP/1.1 504 Gateway Timeout\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\nUpstream connect failed.",
+        );
+        clientSocket.end();
+      }
       storeConnectError("PROXY_TO_SERVER_REQUEST_ERROR", error.message);
     });
 
