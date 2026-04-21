@@ -15,6 +15,7 @@ import { finished } from "node:stream/promises";
 import { isPreviewableContentType } from "../bodies/decodeBody.js";
 import type { createSessionEventBus } from "../realtime/sessionEventBus.js";
 import type { NewSessionRecord } from "../sessions/types.js";
+import { createBodyStore } from "../storage/bodyStore.js";
 import type { createSessionRepository } from "../storage/sessionRepository.js";
 import { createPendingSession, finalizePendingSession } from "./sessionCollector.js";
 
@@ -38,6 +39,7 @@ type TunnelProxyDeps = {
   host?: string;
   repository: ReturnType<typeof createSessionRepository>;
   bus: ReturnType<typeof createSessionEventBus>;
+  bodyDir: string;
 };
 
 function normalizeHost(value: string | undefined) {
@@ -175,13 +177,50 @@ function createPreviewRecorder(input: {
   };
 }
 
+function createBodyCapture(
+  bodyStore: ReturnType<typeof createBodyStore>,
+  kind: "request" | "response",
+  headers: {
+    contentEncoding: string | undefined;
+    contentType: string | undefined;
+  },
+) {
+  const writer = bodyStore.createBodyWriter(kind);
+  const previewRecorder = createPreviewRecorder({
+    contentEncoding: headers.contentEncoding,
+    contentType: headers.contentType,
+    maxPreviewBytes: BODY_PREVIEW_LIMIT,
+  });
+  let pendingWrite = Promise.resolve();
+
+  return {
+    write(chunk: Buffer) {
+      pendingWrite = pendingWrite.then(async () => {
+        previewRecorder.write(chunk);
+        await writer.write(chunk);
+      });
+      return pendingWrite;
+    },
+    async finalize() {
+      await pendingWrite;
+      const [bodyPath, preview] = await Promise.all([writer.finalize(), previewRecorder.finalize()]);
+      return { bodyPath, preview };
+    },
+    async abort() {
+      await writer.abort();
+    },
+  };
+}
+
 export async function startTunnelProxyServer({
   port,
   host = "127.0.0.1",
   repository,
   bus,
+  bodyDir,
 }: TunnelProxyDeps) {
   const selfHosts = getLocalInterfaceHosts();
+  const bodyStore = createBodyStore(bodyDir);
   let activeProxyHost = host;
   let activeProxyPort = port;
 
@@ -226,14 +265,34 @@ export async function startTunnelProxyServer({
       query: targetUrl.search,
       requestHeaders: request.headers,
     });
-    const requestPreviewRecorder = createPreviewRecorder({
-      contentEncoding: request.headers["content-encoding"]?.toString(),
-      contentType: request.headers["content-type"]?.toString(),
-      maxPreviewBytes: BODY_PREVIEW_LIMIT,
-    });
+    const requestCapture = shouldCapture
+      ? createBodyCapture(bodyStore, "request", {
+          contentEncoding: request.headers["content-encoding"]?.toString(),
+          contentType: request.headers["content-type"]?.toString(),
+        })
+      : null;
 
     let stored = false;
+    let requestBodyPath: string | null = null;
     let requestBodyPreview: string | null = null;
+    let responseBodyPath: string | null = null;
+    let responseBodyPreview: string | null = null;
+    let requestFinalizePromise:
+      | Promise<{ bodyPath: string | null; preview: string | null }>
+      | null = null;
+
+    const finalizeRequestCapture = async () => {
+      if (!requestCapture) {
+        return { bodyPath: null, preview: null };
+      }
+      if (!requestFinalizePromise) {
+        requestFinalizePromise = requestCapture.finalize();
+      }
+      const result = await requestFinalizePromise;
+      requestBodyPath = result.bodyPath;
+      requestBodyPreview = result.preview;
+      return result;
+    };
 
     const requestFn = targetUrl.protocol === "https:" ? https.request : http.request;
     const upstream = requestFn(
@@ -252,15 +311,18 @@ export async function startTunnelProxyServer({
           upstreamResponse.headers,
         );
 
-        const responsePreviewRecorder = createPreviewRecorder({
-          contentEncoding: upstreamResponse.headers["content-encoding"]?.toString(),
-          contentType: upstreamResponse.headers["content-type"]?.toString(),
-          maxPreviewBytes: BODY_PREVIEW_LIMIT,
-        });
+        const responseCapture = shouldCapture
+          ? createBodyCapture(bodyStore, "response", {
+              contentEncoding: upstreamResponse.headers["content-encoding"]?.toString(),
+              contentType: upstreamResponse.headers["content-type"]?.toString(),
+            })
+          : null;
 
         upstreamResponse.on("data", (chunk) => {
           const buffer = Buffer.from(chunk);
-          responsePreviewRecorder.write(buffer);
+          if (responseCapture) {
+            void responseCapture.write(buffer);
+          }
           response.write(buffer);
         });
 
@@ -273,16 +335,21 @@ export async function startTunnelProxyServer({
           if (!shouldCapture) {
             return;
           }
-          const responseBodyPreview = await responsePreviewRecorder.finalize();
+          await finalizeRequestCapture();
+          if (responseCapture) {
+            const responseResult = await responseCapture.finalize();
+            responseBodyPath = responseResult.bodyPath;
+            responseBodyPreview = responseResult.preview;
+          }
           storeSession(
             repository,
             bus,
             finalizePendingSession(pending, {
-              requestBodyPath: null,
+              requestBodyPath,
               requestBodyPreview,
               status: upstreamResponse.statusCode ?? 0,
               headers: upstreamResponse.headers,
-              responseBodyPath: null,
+              responseBodyPath,
               durationMs: Date.now() - startedAt,
               responseBodyPreview,
             }),
@@ -303,11 +370,12 @@ export async function startTunnelProxyServer({
       if (!shouldCapture) {
         return;
       }
-      if (requestBodyPreview === null) {
-        requestBodyPreview = await requestPreviewRecorder.finalize();
-      }
+      const requestResult = await finalizeRequestCapture();
+      requestBodyPath = requestResult.bodyPath;
+      requestBodyPreview = requestResult.preview;
       storeSession(repository, bus, {
         ...pending,
+        requestBodyPath,
         requestBodyPreview,
         durationMs: Date.now() - startedAt,
         errorCode: "PROXY_TO_SERVER_REQUEST_ERROR",
@@ -317,13 +385,15 @@ export async function startTunnelProxyServer({
 
     request.on("data", (chunk) => {
       const buffer = Buffer.from(chunk);
-      requestPreviewRecorder.write(buffer);
+      if (requestCapture) {
+        void requestCapture.write(buffer);
+      }
       upstream.write(buffer);
     });
 
     request.on("end", async () => {
-      requestBodyPreview = await requestPreviewRecorder.finalize();
       upstream.end();
+      await finalizeRequestCapture();
     });
 
     request.on("aborted", () => {

@@ -227,7 +227,7 @@ type ActiveSession = {
 export async function startProxyServer({
   port,
   host = "127.0.0.1",
-  httpsMode = "tunnel",
+  httpsMode = "mitm",
   repository,
   bus,
   certificateDir,
@@ -240,6 +240,7 @@ export async function startProxyServer({
       host,
       repository,
       bus,
+      bodyDir,
     });
   }
 
