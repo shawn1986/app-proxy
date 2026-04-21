@@ -267,7 +267,7 @@ export async function startTunnelProxyServer({
 
     const pending = createPendingSession({
       startedAt: new Date(startedAt).toISOString(),
-      scheme: "http",
+      scheme: targetUrl.protocol === "https:" ? "https" : "http",
       method: request.method ?? "GET",
       host: targetUrl.host,
       path: targetUrl.pathname,
@@ -515,7 +515,7 @@ export async function startTunnelProxyServer({
       startedAt: new Date(startedAt).toISOString(),
       scheme: "https",
       method: request.method ?? "CONNECT",
-      host: target.host || request.url || "unknown",
+      host: request.url?.trim() || (target.host ? `${target.host}:${target.port}` : "unknown"),
       path: "",
       query: "",
       requestHeaders: request.headers,
