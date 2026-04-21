@@ -408,6 +408,48 @@ export async function startTunnelProxyServer({
           }
         });
 
+        const storeUpstreamResponseFailure = async (errorMessage: string) => {
+          if (stored) {
+            return;
+          }
+          stored = true;
+          if (!shouldCapture) {
+            return;
+          }
+
+          let captureFailure = "";
+          try {
+            await finalizeRequestCapture();
+          } catch (captureError) {
+            captureFailure += `; request capture finalize failed: ${toErrorMessage(captureError)}`;
+          }
+
+          try {
+            if (responseCapture) {
+              const responseResult = await responseCapture.finalize();
+              responseBodyPath = responseResult.bodyPath;
+              responseBodyPreview = responseResult.preview;
+            }
+          } catch (captureError) {
+            captureFailure += `; response capture finalize failed: ${toErrorMessage(captureError)}`;
+          }
+
+          const finalized = finalizePendingSession(pending, {
+            requestBodyPath,
+            requestBodyPreview,
+            status: upstreamResponse.statusCode ?? 0,
+            headers: upstreamResponse.headers,
+            responseBodyPath,
+            durationMs: Date.now() - startedAt,
+            responseBodyPreview,
+          });
+          storeSession(repository, bus, {
+            ...finalized,
+            errorCode: "PROXY_TO_SERVER_REQUEST_ERROR",
+            errorMessage: `${errorMessage}${captureFailure}`,
+          });
+        };
+
         upstreamResponse.on("end", async () => {
           response.end();
           if (stored) {
@@ -440,6 +482,20 @@ export async function startTunnelProxyServer({
           } catch (error) {
             storeBodyCaptureFailure(error);
           }
+        });
+
+        upstreamResponse.on("aborted", async () => {
+          if (!response.writableEnded) {
+            response.destroy();
+          }
+          await storeUpstreamResponseFailure("Upstream response aborted.");
+        });
+
+        upstreamResponse.on("error", async (error) => {
+          if (!response.writableEnded) {
+            response.destroy();
+          }
+          await storeUpstreamResponseFailure(`Upstream response error: ${toErrorMessage(error)}`);
         });
       },
     );
