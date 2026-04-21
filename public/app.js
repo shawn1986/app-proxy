@@ -234,10 +234,22 @@ async function switchHttpsMode(mode) {
     }
     await loadSetup();
     setLiveStatus("mode switched", "online");
+    const errorNode = elements.setup.querySelector("#https-mode-error");
+    if (errorNode) {
+      errorNode.textContent = "";
+    }
   } catch (error) {
     const message = getErrorMessage(error, "failed to switch HTTPS mode");
     setLiveStatus("switch failed", "warning");
-    elements.setup.innerHTML += `<p class="placeholder">${escapeHtml(`HTTPS mode switch failed: ${message}`)}</p>`;
+    const errorNode = elements.setup.querySelector("#https-mode-error");
+    if (errorNode) {
+      errorNode.textContent = `HTTPS mode switch failed: ${message}`;
+      return;
+    }
+    const fallback = document.createElement("p");
+    fallback.className = "placeholder";
+    fallback.textContent = `HTTPS mode switch failed: ${message}`;
+    elements.setup.append(fallback);
   }
 }
 
@@ -279,6 +291,7 @@ function renderSetup(setup) {
       <button id="https-mode-toggle" class="mode-toggle" type="button" data-next-mode="${nextMode}">
         Switch to ${escapeHtml(getHttpsModeLabel(nextMode))}
       </button>
+      <p id="https-mode-error" class="placeholder"></p>
     </section>
     <section>
       <h3>Android Steps</h3>
@@ -426,4 +439,3 @@ if (elements.filter) {
 
 subscribeToEvents();
 await loadSetup();
-

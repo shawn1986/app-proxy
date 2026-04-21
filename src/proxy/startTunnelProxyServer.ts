@@ -289,6 +289,23 @@ export async function startTunnelProxyServer({
     let requestFinalizePromise:
       | Promise<{ bodyPath: string | null; preview: string | null }>
       | null = null;
+    const toErrorMessage = (error: unknown) =>
+      error instanceof Error ? error.message : String(error);
+    const storeBodyCaptureFailure = (error: unknown) => {
+      if (!shouldCapture) {
+        return;
+      }
+      storeSession(repository, bus, {
+        ...pending,
+        requestBodyPath,
+        requestBodyPreview,
+        responseBodyPath,
+        responseBodyPreview,
+        durationMs: Date.now() - startedAt,
+        errorCode: "BODY_CAPTURE_ERROR",
+        errorMessage: toErrorMessage(error),
+      });
+    };
 
     const finalizeRequestCapture = async () => {
       if (!requestCapture) {
@@ -344,25 +361,29 @@ export async function startTunnelProxyServer({
           if (!shouldCapture) {
             return;
           }
-          await finalizeRequestCapture();
-          if (responseCapture) {
-            const responseResult = await responseCapture.finalize();
-            responseBodyPath = responseResult.bodyPath;
-            responseBodyPreview = responseResult.preview;
+          try {
+            await finalizeRequestCapture();
+            if (responseCapture) {
+              const responseResult = await responseCapture.finalize();
+              responseBodyPath = responseResult.bodyPath;
+              responseBodyPreview = responseResult.preview;
+            }
+            storeSession(
+              repository,
+              bus,
+              finalizePendingSession(pending, {
+                requestBodyPath,
+                requestBodyPreview,
+                status: upstreamResponse.statusCode ?? 0,
+                headers: upstreamResponse.headers,
+                responseBodyPath,
+                durationMs: Date.now() - startedAt,
+                responseBodyPreview,
+              }),
+            );
+          } catch (error) {
+            storeBodyCaptureFailure(error);
           }
-          storeSession(
-            repository,
-            bus,
-            finalizePendingSession(pending, {
-              requestBodyPath,
-              requestBodyPreview,
-              status: upstreamResponse.statusCode ?? 0,
-              headers: upstreamResponse.headers,
-              responseBodyPath,
-              durationMs: Date.now() - startedAt,
-              responseBodyPreview,
-            }),
-          );
         });
       },
     );
@@ -379,16 +400,21 @@ export async function startTunnelProxyServer({
       if (!shouldCapture) {
         return;
       }
-      const requestResult = await finalizeRequestCapture();
-      requestBodyPath = requestResult.bodyPath;
-      requestBodyPreview = requestResult.preview;
+      let requestCaptureFailure = "";
+      try {
+        const requestResult = await finalizeRequestCapture();
+        requestBodyPath = requestResult.bodyPath;
+        requestBodyPreview = requestResult.preview;
+      } catch (captureError) {
+        requestCaptureFailure = `; capture finalize failed: ${toErrorMessage(captureError)}`;
+      }
       storeSession(repository, bus, {
         ...pending,
         requestBodyPath,
         requestBodyPreview,
         durationMs: Date.now() - startedAt,
         errorCode: "PROXY_TO_SERVER_REQUEST_ERROR",
-        errorMessage: error.message,
+        errorMessage: `${error.message}${requestCaptureFailure}`,
       });
     });
 
@@ -402,7 +428,9 @@ export async function startTunnelProxyServer({
 
     request.on("end", async () => {
       upstream.end();
-      await finalizeRequestCapture();
+      try {
+        await finalizeRequestCapture();
+      } catch {}
     });
 
     request.on("aborted", () => {
